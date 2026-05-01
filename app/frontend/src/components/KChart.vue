@@ -9,6 +9,7 @@ const props = defineProps<{
 
 const containerRef = ref<HTMLDivElement | null>(null)
 let chart: Chart | null = null
+let resizeObs: ResizeObserver | null = null
 
 function timezone(period: string) {
   return ['day', 'week', 'month'].includes(period) ? 'Asia/Shanghai' : 'Asia/Shanghai'
@@ -47,9 +48,17 @@ onMounted(() => {
   chart.createIndicator('VOL')
   chart.setTimezone(timezone(props.period))
   if (props.data.length) chart.applyNewData(props.data)
+
+  // 跟随容器尺寸变化（窗口最大化、侧栏切换等）
+  resizeObs = new ResizeObserver(() => {
+    chart?.resize()
+  })
+  resizeObs.observe(containerRef.value)
 })
 
 onBeforeUnmount(() => {
+  resizeObs?.disconnect()
+  resizeObs = null
   if (containerRef.value) dispose(containerRef.value)
   chart = null
 })
