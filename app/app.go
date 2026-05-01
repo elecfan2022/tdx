@@ -95,10 +95,14 @@ func periodToType(period string) (uint8, error) {
 	}
 }
 
-// GetKline 拉取最近 count 根 K 线（最多 800）
-func (a *App) GetKline(code string, period string, count uint16) ([]KlineBar, error) {
-	if count == 0 || count > 800 {
-		count = 320
+// GetKline 拉取最近 count 根 K 线
+// TDX 单次上限 800，超过会自动分页（最多 24000 根）
+func (a *App) GetKline(code string, period string, count int) ([]KlineBar, error) {
+	if count <= 0 {
+		count = 5000
+	}
+	if count > 24000 {
+		count = 24000
 	}
 	t, err := periodToType(period)
 	if err != nil {
@@ -108,12 +112,28 @@ func (a *App) GetKline(code string, period string, count uint16) ([]KlineBar, er
 	if err != nil {
 		return nil, fmt.Errorf("连接行情服务器失败: %w", err)
 	}
-	resp, err := cli.GetKline(t, code, 0, count)
-	if err != nil {
-		return nil, fmt.Errorf("拉取K线失败: %w", err)
+
+	const batch = uint16(800)
+	collected := []*protocol.Kline{}
+	for offset := uint16(0); int(offset) < count; offset += batch {
+		size := batch
+		if int(offset)+int(size) > count {
+			size = uint16(count - int(offset))
+		}
+		resp, err := cli.GetKline(t, code, offset, size)
+		if err != nil {
+			return nil, fmt.Errorf("拉取K线失败: %w", err)
+		}
+		// 协议返回的是按时间正序的一段，把它接到已收集片段的前面
+		collected = append(resp.List, collected...)
+		// 实际返回不足 size，说明已经拿到最早数据
+		if resp.Count < size {
+			break
+		}
 	}
-	out := make([]KlineBar, 0, len(resp.List))
-	for _, k := range resp.List {
+
+	out := make([]KlineBar, 0, len(collected))
+	for _, k := range collected {
 		out = append(out, KlineBar{
 			Timestamp: k.Time.UnixMilli(),
 			Open:      k.Open.Float64(),

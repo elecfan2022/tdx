@@ -63,7 +63,7 @@ async function loadName() {
 async function loadKline() {
   statusMsg.value = '加载中…'
   try {
-    const list = await window.go.main.App.GetKline(code.value, period.value, 320)
+    const list = await window.go.main.App.GetKline(code.value, period.value, 5000)
     data.value = (list ?? []).map((b: any): KLineData => ({
       timestamp: b.timestamp,
       open: b.open,

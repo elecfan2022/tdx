@@ -18,25 +18,33 @@ onMounted(() => {
   if (!containerRef.value) return
   chart = init(containerRef.value)
   if (!chart) return
+  // A 股惯例：红涨绿跌
+  const upColor = '#EF4444'
+  const downColor = '#10B981'
+  const noChangeColor = '#888888'
   chart.setStyles({
     grid: {
       show: false,
     },
     candle: {
       bar: {
-        // A 股惯例：红涨绿跌
-        upColor: '#EF4444',
-        downColor: '#10B981',
-        upBorderColor: '#EF4444',
-        downBorderColor: '#10B981',
-        upWickColor: '#EF4444',
-        downWickColor: '#10B981',
+        upColor,
+        downColor,
+        upBorderColor: upColor,
+        downBorderColor: downColor,
+        upWickColor: upColor,
+        downWickColor: downColor,
       },
+    },
+    // 默认副图柱状颜色（VOL/MACD 共用）
+    indicator: {
+      bars: [{ upColor, downColor, noChangeColor }],
     },
   })
   chart.createIndicator('MA', false, { id: 'candle_pane' })
-  chart.createIndicator('VOL')
+  // 顺序：先 MACD，再 VOL —— MACD 显示在主图下方，VOL 在最底部
   chart.createIndicator('MACD')
+  chart.createIndicator('VOL')
   chart.setTimezone(timezone(props.period))
   if (props.data.length) chart.applyNewData(props.data)
 })
