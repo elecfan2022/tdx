@@ -95,9 +95,16 @@ func periodToType(period string) (uint8, error) {
 	}
 }
 
-// GetKline 拉取最近 count 根 K 线
+// KlineWithChan 给前端的完整数据包：原始 K 线 + 缠论分析（分型 + 笔）
+type KlineWithChan struct {
+	Klines   []KlineBar `json:"klines"`
+	Fractals []Fractal  `json:"fractals"`
+	Bis      []Bi       `json:"bis"`
+}
+
+// GetKline 拉取最近 count 根 K 线，附带缠论分型与笔
 // TDX 单次上限 800，超过会自动分页（最多 24000 根）
-func (a *App) GetKline(code string, period string, count int) ([]KlineBar, error) {
+func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, error) {
 	if count <= 0 {
 		count = 5000
 	}
@@ -144,7 +151,12 @@ func (a *App) GetKline(code string, period string, count int) ([]KlineBar, error
 			Turnover:  k.Amount.Float64(),
 		})
 	}
-	return out, nil
+	chan_ := AnalyzeChan(out)
+	return &KlineWithChan{
+		Klines:   out,
+		Fractals: chan_.Fractals,
+		Bis:      chan_.Bis,
+	}, nil
 }
 
 // StockInfo 给前端的个股标识

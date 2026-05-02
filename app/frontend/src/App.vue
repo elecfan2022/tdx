@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import KChart from './components/KChart.vue'
 import Watchlist from './components/Watchlist.vue'
+import ChanList from './components/ChanList.vue'
 import type { KLineData } from 'klinecharts'
 
 declare global {
@@ -11,6 +12,8 @@ declare global {
 }
 
 type Period = '1m' | '5m' | '30m' | 'day' | 'week' | 'month'
+type RightPanel = 'watchlist' | 'chan' | null
+
 const periods: { value: Period; label: string }[] = [
   { value: '1m', label: '1分钟' },
   { value: '5m', label: '5分钟' },
@@ -20,15 +23,46 @@ const periods: { value: Period; label: string }[] = [
   { value: 'month', label: '月线' },
 ]
 
+interface Fractal {
+  type: 'top' | 'bottom'
+  index: number
+  timestamp: number
+  price: number
+}
+interface Bi {
+  from: Fractal
+  to: Fractal
+}
+
 const code = ref('000001')
 const codeInput = ref('000001')
 const name = ref('')
 const period = ref<Period>('day')
 const data = ref<KLineData[]>([])
+const fractals = ref<Fractal[]>([])
+const bis = ref<Bi[]>([])
 
-// 自选股侧边栏
-const showWatchlist = ref(true)
+// 右侧面板：自选股 / 分型笔列表 互斥；null 表示都不显示
+const rightPanel = ref<RightPanel>('watchlist')
 const watchlistRef = ref<InstanceType<typeof Watchlist> | null>(null)
+const chartRef = ref<InstanceType<typeof KChart> | null>(null)
+
+// 主图缠论显示开关（独立勾选，可同时关掉两个）
+const showFractals = ref(true)
+const showBis = ref(true)
+const showDisplayMenu = ref(false)
+const displayMenuRef = ref<HTMLDivElement | null>(null)
+
+function toggleDisplayMenu() {
+  showDisplayMenu.value = !showDisplayMenu.value
+}
+
+function onDocClick(e: MouseEvent) {
+  if (!showDisplayMenu.value) return
+  if (displayMenuRef.value && !displayMenuRef.value.contains(e.target as Node)) {
+    showDisplayMenu.value = false
+  }
+}
 
 // 状态栏
 const connected = ref(false)
@@ -63,8 +97,9 @@ async function loadName() {
 async function loadKline() {
   statusMsg.value = '加载中…'
   try {
-    const list = await window.go.main.App.GetKline(code.value, period.value, 5000)
-    data.value = (list ?? []).map((b: any): KLineData => ({
+    const resp = await window.go.main.App.GetKline(code.value, period.value, 5000)
+    const list = resp?.klines ?? []
+    data.value = list.map((b: any): KLineData => ({
       timestamp: b.timestamp,
       open: b.open,
       high: b.high,
@@ -73,8 +108,10 @@ async function loadKline() {
       volume: b.volume,
       turnover: b.turnover,
     }))
+    fractals.value = resp?.fractals ?? []
+    bis.value = resp?.bis ?? []
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    statusMsg.value = `共 ${data.value.length} 根 K 线`
+    statusMsg.value = `K 线 ${data.value.length} 根 · 分型 ${fractals.value.length} · 笔 ${bis.value.length}`
   } catch (e: any) {
     statusMsg.value = '错误：' + String(e?.message ?? e)
   }
@@ -97,7 +134,6 @@ function selectPeriod(p: Period) {
   loadKline()
 }
 
-// 自选股选中：刷新左侧主图
 function pickFromWatchlist(c: string, n: string) {
   code.value = c
   codeInput.value = c
@@ -106,11 +142,10 @@ function pickFromWatchlist(c: string, n: string) {
   loadKline()
 }
 
-// 把当前股票加入自选股
 async function addCurrentToWatchlist() {
   try {
     await window.go.main.App.AddToWatchlist(code.value)
-    showWatchlist.value = true
+    rightPanel.value = 'watchlist'
     watchlistRef.value?.reload()
     statusMsg.value = `已添加 ${code.value} 到自选股`
   } catch (e: any) {
@@ -118,15 +153,25 @@ async function addCurrentToWatchlist() {
   }
 }
 
+function togglePanel(p: 'watchlist' | 'chan') {
+  rightPanel.value = rightPanel.value === p ? null : p
+}
+
+function jumpToTimestamp(ts: number) {
+  chartRef.value?.scrollTo(ts)
+}
+
 onMounted(() => {
   refreshStatus()
   loadName()
   loadKline()
   statusTimer = window.setInterval(refreshStatus, 3000)
+  document.addEventListener('click', onDocClick)
 })
 
 onBeforeUnmount(() => {
   if (statusTimer) window.clearInterval(statusTimer)
+  document.removeEventListener('click', onDocClick)
 })
 </script>
 
@@ -136,17 +181,45 @@ onBeforeUnmount(() => {
     <nav class="menubar">
       <button
         class="menu-item"
-        :class="{ active: showWatchlist }"
-        @click="showWatchlist = !showWatchlist"
+        :class="{ active: rightPanel === 'watchlist' }"
+        @click="togglePanel('watchlist')"
       >
         自选股
       </button>
+      <button
+        class="menu-item"
+        :class="{ active: rightPanel === 'chan' }"
+        @click="togglePanel('chan')"
+      >
+        分型/笔
+      </button>
+
+      <span class="menu-sep" />
+
+      <div ref="displayMenuRef" class="display-menu">
+        <button
+          class="menu-item"
+          :class="{ active: showDisplayMenu }"
+          @click.stop="toggleDisplayMenu"
+        >
+          显示 ▾
+        </button>
+        <div v-if="showDisplayMenu" class="display-dropdown">
+          <label class="display-opt">
+            <input type="checkbox" v-model="showFractals" />
+            <span>分型</span>
+          </label>
+          <label class="display-opt">
+            <input type="checkbox" v-model="showBis" />
+            <span>笔</span>
+          </label>
+        </div>
+      </div>
     </nav>
 
-    <!-- 主体：左侧（header + 图） + 右侧自选股 -->
+    <!-- 主体 -->
     <div class="body">
       <section class="main-pane">
-        <!-- 第一行：股票名称 / 代码 + 周期按钮 -->
         <header class="header">
           <div class="title">
             <span class="name">{{ name || (codesReady ? '未知' : '加载中…') }}</span>
@@ -171,22 +244,35 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <!-- 主图：K 线 + VOL + MACD -->
         <main class="chart-wrap">
-          <KChart :data="data" :period="period" />
+          <KChart
+            ref="chartRef"
+            :data="data"
+            :period="period"
+            :fractals="fractals"
+            :bis="bis"
+            :show-fractals="showFractals"
+            :show-bis="showBis"
+          />
         </main>
       </section>
 
       <Watchlist
-        v-show="showWatchlist"
+        v-show="rightPanel === 'watchlist'"
         ref="watchlistRef"
         :active-code="code"
         :codes-ready="codesReady"
         @select="pickFromWatchlist"
       />
+      <ChanList
+        v-if="rightPanel === 'chan'"
+        :fractals="fractals"
+        :bis="bis"
+        :period="period"
+        @pick="jumpToTimestamp"
+      />
     </div>
 
-    <!-- 状态栏 -->
     <footer class="statusbar">
       <span class="dot" :class="{ on: connected }" />
       <span>{{ connected ? '已连接' : '未连接' }}</span>
@@ -220,6 +306,7 @@ html, body, #app {
 .menubar {
   display: flex;
   align-items: center;
+  gap: 6px;
   padding: 0 6px;
   background: #0b1220;
   border-bottom: 1px solid #334155;
@@ -240,6 +327,46 @@ html, body, #app {
 .menubar .menu-item.active {
   color: #fbbf24;
   border-bottom-color: #fbbf24;
+}
+.menu-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 6px;
+  background: #334155;
+}
+/* 显示菜单 + 下拉 */
+.display-menu {
+  position: relative;
+}
+.display-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  min-width: 120px;
+  padding: 4px 0;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 100;
+}
+.display-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+.display-opt:hover {
+  background: #334155;
+}
+.display-opt input[type='checkbox'] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: #2563eb;
 }
 
 /* 主体 */
