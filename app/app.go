@@ -120,6 +120,10 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 		return nil, fmt.Errorf("连接行情服务器失败: %w", err)
 	}
 
+	// 指数（如上证 999999、000001、深成指 399001 等）和股票请求帧一样，
+	// 但服务端响应的解析方式不同，需要分别走 GetIndex / GetKline
+	isIndex := protocol.IsIndex(protocol.AddPrefix(code))
+
 	const batch = uint16(800)
 	collected := []*protocol.Kline{}
 	for offset := uint16(0); int(offset) < count; offset += batch {
@@ -127,7 +131,12 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 		if int(offset)+int(size) > count {
 			size = uint16(count - int(offset))
 		}
-		resp, err := cli.GetKline(t, code, offset, size)
+		var resp *protocol.KlineResp
+		if isIndex {
+			resp, err = cli.GetIndex(t, code, offset, size)
+		} else {
+			resp, err = cli.GetKline(t, code, offset, size)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("拉取K线失败: %w", err)
 		}
