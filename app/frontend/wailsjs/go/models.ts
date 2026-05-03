@@ -7,6 +7,9 @@ export namespace main {
 	    price: number;
 	    origStartIdx: number;
 	    origEndIdx: number;
+	    peakIdx: number;
+	    kHigh: number;
+	    kLow: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Fractal(source);
@@ -20,6 +23,9 @@ export namespace main {
 	        this.price = source["price"];
 	        this.origStartIdx = source["origStartIdx"];
 	        this.origEndIdx = source["origEndIdx"];
+	        this.peakIdx = source["peakIdx"];
+	        this.kHigh = source["kHigh"];
+	        this.kLow = source["kLow"];
 	    }
 	}
 	export class Bi {

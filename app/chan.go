@@ -93,6 +93,8 @@ func processContainment(klines []KlineBar) []ProcessedKline {
 // Fractal 分型
 // Index 为处理后序列中的中间根下标
 // Timestamp/Price 指向原始 K 线序列中实际峰/谷那根
+// PeakIdx 原始序列中达到峰（顶）/ 谷（底）那一根的下标，用于规则 2 计数
+// KHigh/KLow 是 PeakIdx 那根原始 K 线的高低价区间，用于规则 3 比较
 type Fractal struct {
 	Type         string  `json:"type"` // "top" / "bottom"
 	Index        int     `json:"index"`
@@ -100,6 +102,9 @@ type Fractal struct {
 	Price        float64 `json:"price"`
 	OrigStartIdx int     `json:"origStartIdx"`
 	OrigEndIdx   int     `json:"origEndIdx"`
+	PeakIdx      int     `json:"peakIdx"`
+	KHigh        float64 `json:"kHigh"`
+	KLow         float64 `json:"kLow"`
 }
 
 // findFractals 在处理后序列中识别顶/底分型
@@ -119,6 +124,9 @@ func findFractals(p []ProcessedKline, klines []KlineBar) []Fractal {
 				Price:        cur.High,
 				OrigStartIdx: cur.OrigStartIdx,
 				OrigEndIdx:   cur.OrigEndIdx,
+				PeakIdx:      peak,
+				KHigh:        klines[peak].High,
+				KLow:         klines[peak].Low,
 			})
 		}
 		if cur.Low < prev.Low && cur.Low < next.Low &&
@@ -131,6 +139,9 @@ func findFractals(p []ProcessedKline, klines []KlineBar) []Fractal {
 				Price:        cur.Low,
 				OrigStartIdx: cur.OrigStartIdx,
 				OrigEndIdx:   cur.OrigEndIdx,
+				PeakIdx:      peak,
+				KHigh:        klines[peak].High,
+				KLow:         klines[peak].Low,
 			})
 		}
 	}
@@ -151,66 +162,140 @@ func absInt(x int) int {
 }
 
 // biRulesSatisfied 检查两分型之间是否满足新笔规则：
-//  1. 处理后序列中不共用 K 线（中间根下标差至少 3，即两分型之间隔 >=1 根处理后 K 线）
-//  2. 顶分型最高 K 线和底分型最低 K 线之间（不含两端），原始 K 线 >=3 根
+//  1. 处理后序列中两分型不共用 K 线（中根下标差 >=3，等价于两分型之间隔
+//     >=2 根处理后 K 线）
+//  2. 顶分型最高 K 线和底分型最低 K 线之间（不含两端、不考虑包含关系），
+//     原始 K 线 >=3 根 —— 用各自的 PeakIdx（实际峰/谷在原始序列里的下标）
+//     来计数，包含合并不会"吃掉"距离
+//  3. 顶分型最高 K 线的高低价区间至少有一部分高于底分型最低 K 线的区间
+//     —— 即顶 K 线的最高价必须严格高于底 K 线的最高价（否则两 K 线区间
+//     完全反置或重叠在底 K 线之内，不构成"上有下"的笔）
+//
+// 规则 2 的 PeakIdx 实现是从下面这个测例发现的 bug 修过来的：
+// 用例参考《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》
+//   - 标的：上证指数 999999 月线
+//   - 顶分型 1991-01-31 与底分型 1991-05-31 应当成笔
+//   - 旧实现用合并块边界 OrigEnd/OrigStart 计数，若 1991-01 因包含合并把
+//     1991-02 吞入（OrigEnd=2），算出的 between=5-2-1=2 < 3，错判为不成笔
+//   - 新实现用真实峰/谷的 PeakIdx 计数：5-1-1=3，正确成笔
 func biRulesSatisfied(a, b Fractal) bool {
 	if absInt(a.Index-b.Index) < 3 {
 		return false
 	}
 	earlier, later := a, b
-	if earlier.Index > later.Index {
+	if earlier.PeakIdx > later.PeakIdx {
 		earlier, later = b, a
 	}
-	between := later.OrigStartIdx - earlier.OrigEndIdx - 1
-	return between >= 3
+	between := later.PeakIdx - earlier.PeakIdx - 1
+	if between < 3 {
+		return false
+	}
+	// 规则 3：顶 K 线最高价必须高于底 K 线最高价
+	var top, bottom Fractal
+	if a.Type == "top" {
+		top, bottom = a, b
+	} else {
+		top, bottom = b, a
+	}
+	return top.KHigh > bottom.KHigh
+}
+
+// moreExtreme 判断 fx 是否比 base 更极端（顶看更高、底看更低）
+func moreExtreme(fx, base Fractal) bool {
+	if fx.Type == "top" {
+		return fx.Price > base.Price
+	}
+	return fx.Price < base.Price
 }
 
 // buildBi 按新笔规则把分型链转成笔
-//   - 同向分型只保留更极端的（更高的顶 / 更低的底）
-//   - 反向分型作为候选 pending，更极端时更新；满足规则即确认为下一个端点
+//
+// 实现要点：
+//  1. 第一对端点用"惰性确认"，避免错把"小早顶/底"当首端点导致后续 pending 丢失。
+//     具体：维护 candA（先出现的候选）和 candB（候选的反向分型），同向更极端
+//     时替换 candA 并复查 candA-candB 规则，规则一通过就把这两个按时间序锁定
+//     成前两个端点。
+//  2. 锁定后切换到贪心模式：同向更极端就替换 last（清掉 pending），反向时
+//     维护 pending 为最极端反向分型，规则通过即追加为新端点。
 func buildBi(fractals []Fractal) []Bi {
 	if len(fractals) < 2 {
 		return nil
 	}
-	endpoints := []Fractal{fractals[0]}
-	var pending *Fractal
 
-	for i := 1; i < len(fractals); i++ {
+	var endpoints []Fractal
+	var candA, candB *Fractal // 仅在 endpoints 为空时使用
+	var pending *Fractal      // 锁定后使用
+
+	confirmFirstPair := func(a, b Fractal) {
+		if a.Index < b.Index {
+			endpoints = []Fractal{a, b}
+		} else {
+			endpoints = []Fractal{b, a}
+		}
+		candA = nil
+		candB = nil
+	}
+
+	for i := 0; i < len(fractals); i++ {
 		fx := fractals[i]
+
+		if len(endpoints) == 0 {
+			// === 阶段一：尚未确认任何端点 ===
+			if candA == nil {
+				tmp := fx
+				candA = &tmp
+				continue
+			}
+			if fx.Type == candA.Type {
+				// 同类型：更极端则替换 candA，再复查与 candB 的规则
+				if moreExtreme(fx, *candA) {
+					tmp := fx
+					candA = &tmp
+					if candB != nil && biRulesSatisfied(*candB, *candA) {
+						confirmFirstPair(*candA, *candB)
+					}
+				}
+				continue
+			}
+			// 反向类型：维护 candB 为最极端
+			if candB == nil {
+				tmp := fx
+				candB = &tmp
+			} else if moreExtreme(fx, *candB) {
+				tmp := fx
+				candB = &tmp
+			}
+			if biRulesSatisfied(*candA, *candB) {
+				confirmFirstPair(*candA, *candB)
+			}
+			continue
+		}
+
+		// === 阶段二：已锁定至少 2 个端点，走贪心算法 ===
 		last := &endpoints[len(endpoints)-1]
 		if fx.Type == last.Type {
-			// 同向：替换为更极端者，并清空 pending
-			replace := false
-			if fx.Type == "top" && fx.Price > last.Price {
-				replace = true
-			}
-			if fx.Type == "bottom" && fx.Price < last.Price {
-				replace = true
-			}
-			if replace {
+			if moreExtreme(fx, *last) {
 				*last = fx
 				pending = nil
 			}
 			continue
 		}
-		// 反向：维护 pending 为最极端的反向分型
 		if pending == nil {
 			tmp := fx
 			pending = &tmp
-		} else {
-			if (fx.Type == "top" && fx.Price > pending.Price) ||
-				(fx.Type == "bottom" && fx.Price < pending.Price) {
-				tmp := fx
-				pending = &tmp
-			}
+		} else if moreExtreme(fx, *pending) {
+			tmp := fx
+			pending = &tmp
 		}
-		// pending 是否满足规则即可确认成笔
 		if biRulesSatisfied(*last, *pending) {
 			endpoints = append(endpoints, *pending)
 			pending = nil
 		}
 	}
 
+	if len(endpoints) < 2 {
+		return nil
+	}
 	bis := make([]Bi, 0, len(endpoints)-1)
 	for i := 0; i+1 < len(endpoints); i++ {
 		bis = append(bis, Bi{From: endpoints[i], To: endpoints[i+1]})
