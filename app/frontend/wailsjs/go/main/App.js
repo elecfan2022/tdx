@@ -6,6 +6,10 @@ export function AddToWatchlist(arg1) {
   return window['go']['main']['App']['AddToWatchlist'](arg1);
 }
 
+export function DiagnoseBi(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['DiagnoseBi'](arg1, arg2, arg3, arg4);
+}
+
 export function GetKline(arg1, arg2, arg3) {
   return window['go']['main']['App']['GetKline'](arg1, arg2, arg3);
 }

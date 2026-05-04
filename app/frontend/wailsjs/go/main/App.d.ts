@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AddToWatchlist(arg1:string):Promise<Array<main.WatchItem>>;
 
+export function DiagnoseBi(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.BiDiagnosis>;
+
 export function GetKline(arg1:string,arg2:string,arg3:number):Promise<main.KlineWithChan>;
 
 export function GetStatus():Promise<main.Status>;

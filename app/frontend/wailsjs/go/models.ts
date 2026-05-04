@@ -10,6 +10,7 @@ export namespace main {
 	    peakIdx: number;
 	    kHigh: number;
 	    kLow: number;
+	    isEndpoint: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Fractal(source);
@@ -26,6 +27,7 @@ export namespace main {
 	        this.peakIdx = source["peakIdx"];
 	        this.kHigh = source["kHigh"];
 	        this.kLow = source["kLow"];
+	        this.isEndpoint = source["isEndpoint"];
 	    }
 	}
 	export class Bi {
@@ -40,6 +42,56 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.from = this.convertValues(source["from"], Fractal);
 	        this.to = this.convertValues(source["to"], Fractal);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class BiDiagnosis {
+	    fromFound: boolean;
+	    toFound: boolean;
+	    from?: Fractal;
+	    to?: Fractal;
+	    indexDist: number;
+	    peakDist: number;
+	    rule1: string;
+	    rule2: string;
+	    rule3: string;
+	    allPass: boolean;
+	    note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BiDiagnosis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.fromFound = source["fromFound"];
+	        this.toFound = source["toFound"];
+	        this.from = this.convertValues(source["from"], Fractal);
+	        this.to = this.convertValues(source["to"], Fractal);
+	        this.indexDist = source["indexDist"];
+	        this.peakDist = source["peakDist"];
+	        this.rule1 = source["rule1"];
+	        this.rule2 = source["rule2"];
+	        this.rule3 = source["rule3"];
+	        this.allPass = source["allPass"];
+	        this.note = source["note"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

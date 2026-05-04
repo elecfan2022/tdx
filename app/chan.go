@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // 缠论基础结构：包含关系处理、分型识别、笔的构造（新笔规则）
 
 // ProcessedKline 是经过包含关系处理后的合并 K 线
@@ -95,6 +97,7 @@ func processContainment(klines []KlineBar) []ProcessedKline {
 // Timestamp/Price 指向原始 K 线序列中实际峰/谷那根
 // PeakIdx 原始序列中达到峰（顶）/ 谷（底）那一根的下标，用于规则 2 计数
 // KHigh/KLow 是 PeakIdx 那根原始 K 线的高低价区间，用于规则 3 比较
+// IsEndpoint 该分型是否成为某条笔的端点（buildBi 完成后由 AnalyzeChan 回填）
 type Fractal struct {
 	Type         string  `json:"type"` // "top" / "bottom"
 	Index        int     `json:"index"`
@@ -105,6 +108,7 @@ type Fractal struct {
 	PeakIdx      int     `json:"peakIdx"`
 	KHigh        float64 `json:"kHigh"`
 	KLow         float64 `json:"kLow"`
+	IsEndpoint   bool    `json:"isEndpoint"`
 }
 
 // findFractals 在处理后序列中识别顶/底分型
@@ -321,6 +325,21 @@ func AnalyzeChan(klines []KlineBar) ChanAnalysis {
 	}
 	if bis == nil {
 		bis = []Bi{}
+	}
+	// 回填 IsEndpoint：以 (Timestamp, Type) 为键，把所有笔端点对应的分型标记为
+	// 端点，便于前端展示哪些分型实际成笔
+	endpointKey := func(f Fractal) string {
+		return fmt.Sprintf("%d-%s", f.Timestamp, f.Type)
+	}
+	endpointSet := make(map[string]bool)
+	for _, bi := range bis {
+		endpointSet[endpointKey(bi.From)] = true
+		endpointSet[endpointKey(bi.To)] = true
+	}
+	for i := range fractals {
+		if endpointSet[endpointKey(fractals[i])] {
+			fractals[i].IsEndpoint = true
+		}
 	}
 	return ChanAnalysis{Fractals: fractals, Bis: bis}
 }

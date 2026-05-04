@@ -269,6 +269,7 @@ onBeforeUnmount(() => {
         :fractals="fractals"
         :bis="bis"
         :period="period"
+        :code="code"
         @pick="jumpToTimestamp"
       />
     </div>

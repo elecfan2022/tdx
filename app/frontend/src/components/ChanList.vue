@@ -6,6 +6,7 @@ interface Fractal {
   index: number
   timestamp: number
   price: number
+  isEndpoint?: boolean
 }
 interface Bi {
   from: Fractal
@@ -16,13 +17,43 @@ const props = defineProps<{
   fractals: Fractal[]
   bis: Bi[]
   period: string
+  code: string
 }>()
 
 const emit = defineEmits<{
   (e: 'pick', timestamp: number): void
 }>()
 
-const tab = ref<'fractals' | 'bis'>('bis')
+const tab = ref<'fractals' | 'bis' | 'diag'>('bis')
+
+// 诊断输入
+const diagFrom = ref('')
+const diagTo = ref('')
+const diagResult = ref<any>(null)
+const diagLoading = ref(false)
+const diagError = ref('')
+
+async function runDiag() {
+  diagError.value = ''
+  diagResult.value = null
+  if (!diagFrom.value || !diagTo.value) {
+    diagError.value = '请输入两个日期 (YYYY-MM-DD)'
+    return
+  }
+  diagLoading.value = true
+  try {
+    diagResult.value = await window.go.main.App.DiagnoseBi(
+      props.code,
+      props.period,
+      diagFrom.value,
+      diagTo.value,
+    )
+  } catch (e: any) {
+    diagError.value = String(e?.message ?? e)
+  } finally {
+    diagLoading.value = false
+  }
+}
 
 function fmtTime(ts: number): string {
   const d = new Date(ts)
@@ -59,6 +90,13 @@ const bisDesc = computed(() => [...props.bis].reverse())
       >
         分型 ({{ fractals.length }})
       </button>
+      <button
+        class="tab"
+        :class="{ active: tab === 'diag' }"
+        @click="tab = 'diag'"
+      >
+        诊断
+      </button>
     </header>
 
     <div v-if="tab === 'bis'" class="rows">
@@ -84,18 +122,76 @@ const bisDesc = computed(() => [...props.bis].reverse())
       </div>
     </div>
 
-    <div v-else class="rows">
+    <div v-else-if="tab === 'fractals'" class="rows">
       <div v-if="fractals.length === 0" class="empty">无</div>
       <div
         v-for="(fx, i) in fractalsDesc"
         :key="fx.timestamp + '-' + i"
         class="fx-row"
+        :class="{ endpoint: fx.isEndpoint }"
         @click="emit('pick', fx.timestamp)"
       >
         <span class="idx">#{{ fractalsDesc.length - i }}</span>
         <span :class="['mark', fx.type]">{{ fx.type === 'top' ? '顶' : '底' }}</span>
         <span class="time">{{ fmtTime(fx.timestamp) }}</span>
         <span class="price">{{ fx.price.toFixed(2) }}</span>
+        <span class="endpoint-tag" :title="fx.isEndpoint ? '是笔端点' : '不是笔端点'">
+          {{ fx.isEndpoint ? '★' : '·' }}
+        </span>
+      </div>
+    </div>
+
+    <div v-else class="diag">
+      <div class="diag-form">
+        <label>
+          起点
+          <input v-model="diagFrom" placeholder="1997-05-30" />
+        </label>
+        <label>
+          终点
+          <input v-model="diagTo" placeholder="1997-09-30" />
+        </label>
+        <button :disabled="diagLoading" @click="runDiag">
+          {{ diagLoading ? '诊断中…' : '诊断笔' }}
+        </button>
+        <div v-if="diagError" class="err">{{ diagError }}</div>
+      </div>
+
+      <div v-if="diagResult" class="diag-result">
+        <div v-if="!diagResult.fromFound || !diagResult.toFound" class="diag-note">
+          {{ diagResult.note }}
+          <ul>
+            <li>起点找到：{{ diagResult.fromFound }}</li>
+            <li>终点找到：{{ diagResult.toFound }}</li>
+          </ul>
+        </div>
+        <template v-else>
+          <div class="diag-section">
+            <div class="diag-label">起点</div>
+            <div>{{ diagResult.from.type === 'top' ? '顶' : '底' }}
+              {{ fmtTime(diagResult.from.timestamp) }}
+              价 {{ diagResult.from.price.toFixed(2) }}</div>
+            <div class="diag-sub">K 线区间 {{ diagResult.from.kLow.toFixed(2) }} – {{ diagResult.from.kHigh.toFixed(2) }}</div>
+            <div class="diag-sub">处理后下标 {{ diagResult.from.index }}, PeakIdx {{ diagResult.from.peakIdx }}</div>
+          </div>
+          <div class="diag-section">
+            <div class="diag-label">终点</div>
+            <div>{{ diagResult.to.type === 'top' ? '顶' : '底' }}
+              {{ fmtTime(diagResult.to.timestamp) }}
+              价 {{ diagResult.to.price.toFixed(2) }}</div>
+            <div class="diag-sub">K 线区间 {{ diagResult.to.kLow.toFixed(2) }} – {{ diagResult.to.kHigh.toFixed(2) }}</div>
+            <div class="diag-sub">处理后下标 {{ diagResult.to.index }}, PeakIdx {{ diagResult.to.peakIdx }}</div>
+          </div>
+          <div class="diag-section">
+            <div class="diag-label">规则判定</div>
+            <div class="diag-rule">{{ diagResult.rule1 }}</div>
+            <div class="diag-rule">{{ diagResult.rule2 }}</div>
+            <div class="diag-rule">{{ diagResult.rule3 }}</div>
+          </div>
+          <div class="diag-section diag-final" :class="{ pass: diagResult.allPass, fail: !diagResult.allPass }">
+            {{ diagResult.allPass ? '✓ 三条规则都满足' : '✗ ' + diagResult.note }}
+          </div>
+        </template>
       </div>
     </div>
   </aside>
@@ -159,6 +255,24 @@ const bisDesc = computed(() => [...props.bis].reverse())
   align-items: center;
   gap: 6px;
 }
+.fx-row.endpoint {
+  background: rgba(251, 191, 36, 0.08);
+}
+.fx-row.endpoint:hover {
+  background: rgba(251, 191, 36, 0.18);
+}
+.endpoint-tag {
+  width: 14px;
+  text-align: center;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.fx-row.endpoint .endpoint-tag {
+  color: #fbbf24;
+}
+.fx-row:not(.endpoint) .endpoint-tag {
+  color: #475569;
+}
 .bi-line {
   display: flex;
   align-items: center;
@@ -199,5 +313,88 @@ const bisDesc = computed(() => [...props.bis].reverse())
 }
 .price {
   color: #e2e8f0;
+}
+
+/* 诊断面板 */
+.diag {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  font-size: 12px;
+  font-family: 'Consolas', monospace;
+}
+.diag-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #334155;
+  margin-bottom: 10px;
+}
+.diag-form label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #94a3b8;
+}
+.diag-form input {
+  flex: 1;
+  padding: 3px 6px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 3px;
+  font-family: inherit;
+}
+.diag-form button {
+  padding: 5px 0;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.diag-form button:disabled {
+  background: #475569;
+  cursor: not-allowed;
+}
+.diag-form .err {
+  color: #f87171;
+  font-size: 11px;
+}
+.diag-section {
+  margin-bottom: 10px;
+}
+.diag-label {
+  color: #fbbf24;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.diag-sub {
+  color: #94a3b8;
+  font-size: 11px;
+  padding-left: 8px;
+}
+.diag-rule {
+  color: #cbd5e1;
+  padding-left: 8px;
+  line-height: 1.6;
+}
+.diag-final {
+  padding: 6px 8px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-align: center;
+}
+.diag-final.pass {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+.diag-final.fail {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+}
+.diag-note {
+  color: #f87171;
 }
 </style>

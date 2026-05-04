@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	tdx "github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/protocol"
@@ -166,6 +167,103 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 		Fractals: chan_.Fractals,
 		Bis:      chan_.Bis,
 	}, nil
+}
+
+// BiDiagnosis 笔成立诊断结果，给前端控制台打印用
+type BiDiagnosis struct {
+	FromFound bool    `json:"fromFound"`
+	ToFound   bool    `json:"toFound"`
+	From      Fractal `json:"from,omitempty"`
+	To        Fractal `json:"to,omitempty"`
+	IndexDist int     `json:"indexDist"` // 处理后序列下标差
+	PeakDist  int     `json:"peakDist"`  // 真实峰/谷在原始序列的间隔（不含两端）
+	Rule1     string  `json:"rule1"`     // 距离 ≥ 3
+	Rule2     string  `json:"rule2"`     // PeakIdx 间隔 ≥ 3
+	Rule3     string  `json:"rule3"`     // 顶 KHigh > 底 KHigh
+	AllPass   bool    `json:"allPass"`
+	Note      string  `json:"note"`
+}
+
+// DiagnoseBi 取两个日期上的分型，逐条规则跑一遍，告诉前端每条结果与数值
+// 日期格式：YYYY-MM-DD（按上海时区比对，规避时间戳精确匹配的时区差）
+func (a *App) DiagnoseBi(code, period, fromDate, toDate string) (*BiDiagnosis, error) {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	formatDate := func(ts int64) string {
+		return time.UnixMilli(ts).In(loc).Format("2006-01-02")
+	}
+
+	resp, err := a.GetKline(code, period, 5000)
+	if err != nil {
+		return nil, err
+	}
+
+	diag := &BiDiagnosis{}
+	var fromFx, toFx *Fractal
+	for i := range resp.Fractals {
+		d := formatDate(resp.Fractals[i].Timestamp)
+		if d == fromDate {
+			fromFx = &resp.Fractals[i]
+		}
+		if d == toDate {
+			toFx = &resp.Fractals[i]
+		}
+	}
+	diag.FromFound = fromFx != nil
+	diag.ToFound = toFx != nil
+	if fromFx == nil || toFx == nil {
+		diag.Note = fmt.Sprintf("未找到对应日期的分型（输入了 from=%s, to=%s；列表里日期是用上海时区显示的，请用同样格式输入）",
+			fromDate, toDate)
+		return diag, nil
+	}
+	diag.From = *fromFx
+	diag.To = *toFx
+
+	if fromFx.Type == toFx.Type {
+		diag.Note = "两个分型类型相同（都是顶或都是底），不能成笔"
+		return diag, nil
+	}
+
+	diag.IndexDist = absInt(fromFx.Index - toFx.Index)
+	earlier, later := *fromFx, *toFx
+	if earlier.PeakIdx > later.PeakIdx {
+		earlier, later = *toFx, *fromFx
+	}
+	diag.PeakDist = later.PeakIdx - earlier.PeakIdx - 1
+
+	rule1Pass := diag.IndexDist >= 3
+	rule2Pass := diag.PeakDist >= 3
+	var top, bottom Fractal
+	if fromFx.Type == "top" {
+		top, bottom = *fromFx, *toFx
+	} else {
+		top, bottom = *toFx, *fromFx
+	}
+	rule3Pass := top.KHigh > bottom.KHigh
+
+	diag.Rule1 = fmt.Sprintf("处理后下标距离 %d ≥ 3 → %v", diag.IndexDist, rule1Pass)
+	diag.Rule2 = fmt.Sprintf("PeakIdx 间隔 %d ≥ 3 → %v", diag.PeakDist, rule2Pass)
+	diag.Rule3 = fmt.Sprintf("顶 KHigh %.2f > 底 KHigh %.2f → %v", top.KHigh, bottom.KHigh, rule3Pass)
+	diag.AllPass = rule1Pass && rule2Pass && rule3Pass
+
+	if !diag.AllPass {
+		fail := []string{}
+		if !rule1Pass {
+			fail = append(fail, "规则1")
+		}
+		if !rule2Pass {
+			fail = append(fail, "规则2")
+		}
+		if !rule3Pass {
+			fail = append(fail, "规则3")
+		}
+		diag.Note = fmt.Sprintf("不满足：%v", fail)
+	} else {
+		diag.Note = "三条规则都满足。若仍不成笔，可能在 buildBi 阶段被 pending/replace 流程淘汰。"
+	}
+	return diag, nil
 }
 
 // StockInfo 给前端的个股标识
