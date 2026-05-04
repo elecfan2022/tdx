@@ -279,8 +279,35 @@ func buildBi(fractals []Fractal) []Bi {
 		last := &endpoints[len(endpoints)-1]
 		if fx.Type == last.Type {
 			if moreExtreme(fx, *last) {
-				*last = fx
-				pending = nil
+				// 同向更极端：本来要直接用 fx 替换 last。但若此时 pending（反向、
+				// 与 last 规则失败）能与 fx 成笔，且 pending 比 pre-last（同类型，
+				// 由交替性必然如此）更极端，则做"救活"——pending 顶替 pre-last，
+				// fx 顶替 last，等价于把"旧 pre-last + 旧 last"这一对换成
+				// "pending + fx"。原本卡在 pending 的反向分型这次得以并入端点链。
+				//
+				// 参考《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》：
+				// 相邻两分型若不能成笔，二者必只取其一；取舍由后续更极端的同向分型
+				// "延伸"哪一边来决定。例如上证 999999 月线，1992-11-30 底与
+				// 1993-02-26 顶不能成笔；1994-07-29 出现更低的底分型，使 1992-11-30
+				// 失效，从而保留 1993-02-26 顶分型，而原本"未失效"的 1992-05-29 顶
+				// 也跟着退出端点。这一回溯式取舍正是本分支实现的"救活"逻辑。
+				rescued := false
+				if pending != nil && biRulesSatisfied(*pending, fx) {
+					if n := len(endpoints); n >= 2 {
+						preLast := &endpoints[n-2]
+						// 端点交替性 → preLast 与 pending 必同类型
+						if moreExtreme(*pending, *preLast) {
+							*preLast = *pending
+							*last = fx
+							pending = nil
+							rescued = true
+						}
+					}
+				}
+				if !rescued {
+					*last = fx
+					pending = nil
+				}
 			}
 			continue
 		}
