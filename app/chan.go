@@ -98,6 +98,9 @@ func processContainment(klines []KlineBar) []ProcessedKline {
 // PeakIdx 原始序列中达到峰（顶）/ 谷（底）那一根的下标，用于规则 2 计数
 // KHigh/KLow 是 PeakIdx 那根原始 K 线的高低价区间，用于规则 3 比较
 // IsEndpoint 该分型是否成为某条笔的端点（buildBi 完成后由 AnalyzeChan 回填）
+// LeftIdx/RightIdx 分型左右两侧邻接处理后 K 线在原始序列里的代表点下标
+//   （顶取 HighIdx 即"那根 K 线的最高点所在原始 K 线"；底取 LowIdx）
+//   前端用来在 hover 峰/谷 K 线时提示构成分型的另两根 K 线
 type Fractal struct {
 	Type         string  `json:"type"` // "top" / "bottom"
 	Index        int     `json:"index"`
@@ -109,6 +112,8 @@ type Fractal struct {
 	KHigh        float64 `json:"kHigh"`
 	KLow         float64 `json:"kLow"`
 	IsEndpoint   bool    `json:"isEndpoint"`
+	LeftIdx      int     `json:"leftIdx"`
+	RightIdx     int     `json:"rightIdx"`
 }
 
 // findFractals 在处理后序列中识别顶/底分型
@@ -131,6 +136,8 @@ func findFractals(p []ProcessedKline, klines []KlineBar) []Fractal {
 				PeakIdx:      peak,
 				KHigh:        klines[peak].High,
 				KLow:         klines[peak].Low,
+				LeftIdx:      prev.HighIdx,
+				RightIdx:     next.HighIdx,
 			})
 		}
 		if cur.Low < prev.Low && cur.Low < next.Low &&
@@ -146,6 +153,8 @@ func findFractals(p []ProcessedKline, klines []KlineBar) []Fractal {
 				PeakIdx:      peak,
 				KHigh:        klines[peak].High,
 				KLow:         klines[peak].Low,
+				LeftIdx:      prev.LowIdx,
+				RightIdx:     next.LowIdx,
 			})
 		}
 	}

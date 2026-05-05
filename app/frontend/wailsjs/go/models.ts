@@ -11,6 +11,8 @@ export namespace main {
 	    kHigh: number;
 	    kLow: number;
 	    isEndpoint: boolean;
+	    leftIdx: number;
+	    rightIdx: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Fractal(source);
@@ -28,6 +30,8 @@ export namespace main {
 	        this.kHigh = source["kHigh"];
 	        this.kLow = source["kLow"];
 	        this.isEndpoint = source["isEndpoint"];
+	        this.leftIdx = source["leftIdx"];
+	        this.rightIdx = source["rightIdx"];
 	    }
 	}
 	export class Bi {

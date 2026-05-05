@@ -94,10 +94,18 @@ async function loadName() {
   }
 }
 
+// 防竞态：每次 loadKline 拿一个递增 token；await 返回后校验是不是最新的，
+// 否则丢弃（避免用户快速切代码/周期时旧请求覆盖新结果）
+let klineToken = 0
+
 async function loadKline() {
+  const token = ++klineToken
+  const reqCode = code.value
+  const reqPeriod = period.value
   statusMsg.value = '加载中…'
   try {
-    const resp = await window.go.main.App.GetKline(code.value, period.value, 5000)
+    const resp = await window.go.main.App.GetKline(reqCode, reqPeriod, 5000)
+    if (token !== klineToken) return // 已有更新的请求在路上，丢弃此次结果
     const list = resp?.klines ?? []
     data.value = list.map((b: any): KLineData => ({
       timestamp: b.timestamp,
@@ -113,7 +121,9 @@ async function loadKline() {
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     statusMsg.value = `K 线 ${data.value.length} 根 · 分型 ${fractals.value.length} · 笔 ${bis.value.length}`
   } catch (e: any) {
-    statusMsg.value = '错误：' + String(e?.message ?? e)
+    if (token === klineToken) {
+      statusMsg.value = '错误：' + String(e?.message ?? e)
+    }
   }
 }
 

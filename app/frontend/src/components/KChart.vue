@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import { init, dispose, registerOverlay, type Chart, type KLineData } from 'klinecharts'
 
 // 自定义镜像版 simpleAnnotation —— 画在数据点下方，箭头朝上指向 K 线最低点
@@ -56,6 +56,9 @@ interface Fractal {
   index: number
   timestamp: number
   price: number
+  peakIdx?: number
+  leftIdx?: number
+  rightIdx?: number
 }
 interface Bi {
   from: Fractal
@@ -132,6 +135,55 @@ function scrollTo(timestamp: number) {
 }
 defineExpose({ scrollTo })
 
+// === Hover 提示：以分型峰/谷 K 线为锚点，显示构成分型的左右 K 线 ===
+const peakIdxToFractal = computed(() => {
+  const m = new Map<number, Fractal>()
+  for (const fx of props.fractals) {
+    if (fx.peakIdx !== undefined) m.set(fx.peakIdx, fx)
+  }
+  return m
+})
+
+const hoverInfo = ref<{
+  show: boolean
+  type: 'top' | 'bottom'
+  peakDate: string
+  leftDate: string
+  rightDate: string
+  peakHigh: number
+  peakLow: number
+  leftHigh: number
+  leftLow: number
+  rightHigh: number
+  rightLow: number
+}>({
+  show: false,
+  type: 'top',
+  peakDate: '',
+  leftDate: '',
+  rightDate: '',
+  peakHigh: 0,
+  peakLow: 0,
+  leftHigh: 0,
+  leftLow: 0,
+  rightHigh: 0,
+  rightLow: 0,
+})
+
+function fmtDate(ts?: number) {
+  if (!ts) return '—'
+  const d = new Date(ts)
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  if (['day', 'week', 'month'].includes(props.period)) {
+    return `${yyyy}-${mm}-${dd}`
+  }
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
+}
+
 onMounted(() => {
   if (!containerRef.value) return
   chart = init(containerRef.value)
@@ -167,16 +219,64 @@ onMounted(() => {
   if (props.data.length) chart.applyNewData(props.data)
   drawChan()
 
+  // 监听十字线变化：当鼠标停留在分型的峰/谷 K 线上时，显示提示
+  // 仅当"显示·分型"勾选时启用
+  ;(chart as any).subscribeAction?.('onCrosshairChange', (params: any) => {
+    if (!props.showFractals) {
+      hoverInfo.value.show = false
+      return
+    }
+    const dataIndex: number | undefined = params?.dataIndex
+    if (dataIndex === undefined || dataIndex < 0) {
+      hoverInfo.value.show = false
+      return
+    }
+    const fx = peakIdxToFractal.value.get(dataIndex)
+    if (!fx) {
+      hoverInfo.value.show = false
+      return
+    }
+    const data = props.data
+    const peak = fx.peakIdx !== undefined ? data[fx.peakIdx] : undefined
+    const left = fx.leftIdx !== undefined ? data[fx.leftIdx] : undefined
+    const right = fx.rightIdx !== undefined ? data[fx.rightIdx] : undefined
+    if (!peak) {
+      hoverInfo.value.show = false
+      return
+    }
+    hoverInfo.value = {
+      show: true,
+      type: fx.type,
+      peakDate: fmtDate(peak.timestamp),
+      leftDate: fmtDate(left?.timestamp),
+      rightDate: fmtDate(right?.timestamp),
+      peakHigh: peak.high,
+      peakLow: peak.low,
+      leftHigh: left?.high ?? 0,
+      leftLow: left?.low ?? 0,
+      rightHigh: right?.high ?? 0,
+      rightLow: right?.low ?? 0,
+    }
+  })
+
   // 跟随容器尺寸变化（窗口最大化、侧栏切换等）
+  // 用 rAF 推迟到下一帧，避免在浏览器还没完成布局时读到旧尺寸（最大化场景下尤明显）
   resizeObs = new ResizeObserver(() => {
-    chart?.resize()
+    requestAnimationFrame(() => chart?.resize())
   })
   resizeObs.observe(containerRef.value)
+  // 兜底：直接挂到 window resize，最大化触发时同样会响应
+  window.addEventListener('resize', onWinResize)
 })
+
+function onWinResize() {
+  requestAnimationFrame(() => chart?.resize())
+}
 
 onBeforeUnmount(() => {
   resizeObs?.disconnect()
   resizeObs = null
+  window.removeEventListener('resize', onWinResize)
   if (containerRef.value) dispose(containerRef.value)
   chart = null
 })
@@ -201,16 +301,87 @@ watch(
   () => drawChan(),
   { deep: false },
 )
+
+// 关掉"分型"开关时，立刻把 hover 提示框收起
+watch(
+  () => props.showFractals,
+  (v) => {
+    if (!v) hoverInfo.value.show = false
+  },
+)
 </script>
 
 <template>
-  <div ref="containerRef" class="kchart" />
+  <div ref="containerRef" class="kchart">
+    <div v-if="hoverInfo.show" class="fx-tooltip" :class="hoverInfo.type">
+      <div class="title">{{ hoverInfo.type === 'top' ? '顶分型' : '底分型' }}</div>
+      <div class="row">
+        <span class="lbl">左</span>
+        <span class="date">{{ hoverInfo.leftDate }}</span>
+        <span class="prc">{{ hoverInfo.leftHigh.toFixed(2) }}/{{ hoverInfo.leftLow.toFixed(2) }}</span>
+      </div>
+      <div class="row peak">
+        <span class="lbl">中</span>
+        <span class="date">{{ hoverInfo.peakDate }}</span>
+        <span class="prc">{{ hoverInfo.peakHigh.toFixed(2) }}/{{ hoverInfo.peakLow.toFixed(2) }}</span>
+      </div>
+      <div class="row">
+        <span class="lbl">右</span>
+        <span class="date">{{ hoverInfo.rightDate }}</span>
+        <span class="prc">{{ hoverInfo.rightHigh.toFixed(2) }}/{{ hoverInfo.rightLow.toFixed(2) }}</span>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
 .kchart {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 480px;
+}
+.fx-tooltip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid #334155;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: 'Consolas', monospace;
+  color: #e2e8f0;
+  pointer-events: none;
+  min-width: 180px;
+}
+.fx-tooltip.top { border-color: rgba(239, 68, 68, 0.5); }
+.fx-tooltip.bottom { border-color: rgba(16, 185, 129, 0.5); }
+.fx-tooltip .title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.fx-tooltip.top .title { color: #ef4444; }
+.fx-tooltip.bottom .title { color: #10b981; }
+.fx-tooltip .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+.fx-tooltip .row.peak { color: #fbbf24; }
+.fx-tooltip .lbl {
+  width: 16px;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+.fx-tooltip .row.peak .lbl { color: #fbbf24; }
+.fx-tooltip .date {
+  flex: 1;
+}
+.fx-tooltip .prc {
+  color: #cbd5e1;
 }
 </style>
