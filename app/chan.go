@@ -221,15 +221,31 @@ func moreExtreme(fx, base Fractal) bool {
 	return fx.Price < base.Price
 }
 
-// buildBi 按新笔规则把分型链转成笔
+// buildBi 按新笔规则与"笔的可修改性"把分型链转成笔
 //
 // 实现要点：
-//  1. 第一对端点用"惰性确认"，避免错把"小早顶/底"当首端点导致后续 pending 丢失。
-//     具体：维护 candA（先出现的候选）和 candB（候选的反向分型），同向更极端
-//     时替换 candA 并复查 candA-candB 规则，规则一通过就把这两个按时间序锁定
-//     成前两个端点。
-//  2. 锁定后切换到贪心模式：同向更极端就替换 last（清掉 pending），反向时
-//     维护 pending 为最极端反向分型，规则通过即追加为新端点。
+//  1. 第一对端点用"惰性确认"：维护 candA（先出现的候选）和 candB（候选的反向
+//     分型），同向更极端时替换 candA 并复查 candA-candB 规则；规则一通过就把
+//     这两个按时间序锁定成前两个端点。这避免了错把"小早顶/底"当首端点。
+//
+//  2. 锁定后切换到贪心 + 笔修正：
+//     - 反向 fx：维护 pending 为最极端反向分型，规则通过即追加为新端点。
+//     - 同向更极端 fx：触发"笔修正"，分两种情况——
+//       * Case 1（pending 不比 prev 更极端）：仅延伸 last，pending 弃。
+//          直观含义：上一笔还未走完，新的更极端端点出现，但中间反向分型不够强
+//          以撼动 prev → 直接把 last 平移到 fx。
+//       * Case 2（pending 比 prev 更极端）：笔的另一端也需修正。先把 prev
+//         替换成 pending（顶/底"延伸"），丢弃旧 last，把 fx 当新 pending，
+//         再校验新 last（=替换后的 prev）与 fx 是否成笔。
+//          直观含义：上一笔的 prev 端被新出现的、更极端的反向分型证伪 → 整个
+//          笔重组：prev→pending（被替换），last→fx（候选）。
+//
+// 参考：
+//   《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》——相邻两分型
+//   若不能成笔，二者必只取其一；取舍由后续更极端的同向分型来"延伸"哪一边决定。
+//   案例：上证 999999 月线，T(1992-05-29) 与 B(1992-11-30) 不能成笔；后来出现
+//   B(1994-07-29) 更低的底，使 B(1992-11-30) 失效，T(1993-02-26) 取代 T(1992-
+//   05-29)，符合 case 2 描述。
 func buildBi(fractals []Fractal) []Bi {
 	if len(fractals) < 2 {
 		return nil
@@ -252,7 +268,8 @@ func buildBi(fractals []Fractal) []Bi {
 	for i := 0; i < len(fractals); i++ {
 		fx := fractals[i]
 
-		if len(endpoints) == 0 {
+		switch {
+		case len(endpoints) == 0:
 			// === 阶段一：尚未确认任何端点 ===
 			if candA == nil {
 				tmp := fx
@@ -282,44 +299,61 @@ func buildBi(fractals []Fractal) []Bi {
 				confirmFirstPair(*candA, *candB)
 			}
 			continue
-		}
 
-		// === 阶段二：已锁定至少 2 个端点，走贪心算法 ===
-		last := &endpoints[len(endpoints)-1]
-		if fx.Type == last.Type {
-			if moreExtreme(fx, *last) {
-				// 同向更极端：本来要直接用 fx 替换 last。但若此时 pending（反向、
-				// 与 last 规则失败）能与 fx 成笔，且 pending 比 pre-last（同类型，
-				// 由交替性必然如此）更极端，则做"救活"——pending 顶替 pre-last，
-				// fx 顶替 last，等价于把"旧 pre-last + 旧 last"这一对换成
-				// "pending + fx"。原本卡在 pending 的反向分型这次得以并入端点链。
-				//
-				// 参考《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》：
-				// 相邻两分型若不能成笔，二者必只取其一；取舍由后续更极端的同向分型
-				// "延伸"哪一边来决定。例如上证 999999 月线，1992-11-30 底与
-				// 1993-02-26 顶不能成笔；1994-07-29 出现更低的底分型，使 1992-11-30
-				// 失效，从而保留 1993-02-26 顶分型，而原本"未失效"的 1992-05-29 顶
-				// 也跟着退出端点。这一回溯式取舍正是本分支实现的"救活"逻辑。
-				rescued := false
-				if pending != nil && biRulesSatisfied(*pending, fx) {
-					if n := len(endpoints); n >= 2 {
-						preLast := &endpoints[n-2]
-						// 端点交替性 → preLast 与 pending 必同类型
-						if moreExtreme(*pending, *preLast) {
-							*preLast = *pending
-							*last = fx
-							pending = nil
-							rescued = true
-						}
-					}
-				}
-				if !rescued {
+		case len(endpoints) == 1:
+			// case 2 修正可能把 endpoints 砍到只剩 1 个，这里走"准阶段一"逻辑
+			last := &endpoints[0]
+			if fx.Type == last.Type {
+				if moreExtreme(fx, *last) {
 					*last = fx
 					pending = nil
 				}
+				continue
+			}
+			if pending == nil {
+				tmp := fx
+				pending = &tmp
+			} else if moreExtreme(fx, *pending) {
+				tmp := fx
+				pending = &tmp
+			}
+			if biRulesSatisfied(*last, *pending) {
+				endpoints = append(endpoints, *pending)
+				pending = nil
 			}
 			continue
 		}
+
+		// === 阶段二：已锁定至少 2 个端点 ===
+		last := &endpoints[len(endpoints)-1]
+		prev := &endpoints[len(endpoints)-2]
+
+		if fx.Type == last.Type {
+			if !moreExtreme(fx, *last) {
+				continue // fx 不更极端，忽略
+			}
+			// fx 比 last 更极端 → 触发笔修正
+			if pending != nil && moreExtreme(*pending, *prev) {
+				// Case 2：pending 比 prev 更极端。把 prev 换成 pending、
+				// 丢弃旧 last，fx 作为新候选反向分型，再校核成笔
+				*prev = *pending
+				endpoints = endpoints[:len(endpoints)-1]
+				tmp := fx
+				pending = &tmp
+				newLast := &endpoints[len(endpoints)-1]
+				if biRulesSatisfied(*newLast, *pending) {
+					endpoints = append(endpoints, *pending)
+					pending = nil
+				}
+				continue
+			}
+			// Case 1：仅延伸 last（pending 不构成对 prev 的威胁）
+			*last = fx
+			pending = nil
+			continue
+		}
+
+		// 反向类型：维护 pending 为最极端，规则通过即追加为端点
 		if pending == nil {
 			tmp := fx
 			pending = &tmp
