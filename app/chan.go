@@ -235,17 +235,23 @@ func moreExtreme(fx, base Fractal) bool {
 //          直观含义：上一笔还未走完，新的更极端端点出现，但中间反向分型不够强
 //          以撼动 prev → 直接把 last 平移到 fx。
 //       * Case 2（pending 比 prev 更极端）：笔的另一端也需修正。先把 prev
-//         替换成 pending（顶/底"延伸"），丢弃旧 last，把 fx 当新 pending，
-//         再校验新 last（=替换后的 prev）与 fx 是否成笔。
-//          直观含义：上一笔的 prev 端被新出现的、更极端的反向分型证伪 → 整个
-//          笔重组：prev→pending（被替换），last→fx（候选）。
+//         替换成 pending（顶/底"延伸"），丢弃旧 last，再把循环回退到 pending
+//         那一根，从 pending 之后的所有分型重新按笔规则扫一遍，看哪些可以成笔。
+//          直观含义：上一笔的 prev 端被新出现的、更极端的反向分型证伪 → 笔
+//          的"边"被改写后，pending 之后的所有分型必须以新边为起点重新审视。
+//          这正是"分型可修改性"——一旦笔的端点变了，后面挂在 pending 但因
+//          rule 失败没成笔的分型，可能在新链路下成笔。
 //
 // 参考：
 //   《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》——相邻两分型
 //   若不能成笔，二者必只取其一；取舍由后续更极端的同向分型来"延伸"哪一边决定。
-//   案例：上证 999999 月线，T(1992-05-29) 与 B(1992-11-30) 不能成笔；后来出现
-//   B(1994-07-29) 更低的底，使 B(1992-11-30) 失效，T(1993-02-26) 取代 T(1992-
-//   05-29)，符合 case 2 描述。
+//   案例：
+//   - 上证 999999 月线，T(1992-05-29) 与 B(1992-11-30) 不能成笔；后来出现
+//     B(1994-07-29) 更低的底，使 B(1992-11-30) 失效，T(1993-02-26) 取代
+//     T(1992-05-29)。
+//   - 301153 日线，B(2025-04-07) 与 T(2025-04-03) 之间无法成笔；T(2025-07-14)
+//     更高的顶 + B(04-07) 更低的底触发 case 2，回退后从 B(04-07) 重新扫到
+//     T(07-14)，得到 B(04-07)→T(06-25)→B(07-03)→T(07-14) 三笔。
 func buildBi(fractals []Fractal) []Bi {
 	if len(fractals) < 2 {
 		return nil
@@ -254,6 +260,17 @@ func buildBi(fractals []Fractal) []Bi {
 	var endpoints []Fractal
 	var candA, candB *Fractal // 仅在 endpoints 为空时使用
 	var pending *Fractal      // 锁定后使用
+	pendingIdx := -1          // pending 在 fractals 切片里的位置，case 2 回退用
+
+	clearPending := func() {
+		pending = nil
+		pendingIdx = -1
+	}
+	setPending := func(fx Fractal, idx int) {
+		tmp := fx
+		pending = &tmp
+		pendingIdx = idx
+	}
 
 	confirmFirstPair := func(a, b Fractal) {
 		if a.Index < b.Index {
@@ -301,25 +318,21 @@ func buildBi(fractals []Fractal) []Bi {
 			continue
 
 		case len(endpoints) == 1:
-			// case 2 修正可能把 endpoints 砍到只剩 1 个，这里走"准阶段一"逻辑
+			// case 2 修正可能把 endpoints 砍到只剩 1 个，这里走"准阶段二"逻辑
 			last := &endpoints[0]
 			if fx.Type == last.Type {
 				if moreExtreme(fx, *last) {
 					*last = fx
-					pending = nil
+					clearPending()
 				}
 				continue
 			}
-			if pending == nil {
-				tmp := fx
-				pending = &tmp
-			} else if moreExtreme(fx, *pending) {
-				tmp := fx
-				pending = &tmp
+			if pending == nil || moreExtreme(fx, *pending) {
+				setPending(fx, i)
 			}
 			if biRulesSatisfied(*last, *pending) {
 				endpoints = append(endpoints, *pending)
-				pending = nil
+				clearPending()
 			}
 			continue
 		}
@@ -334,36 +347,29 @@ func buildBi(fractals []Fractal) []Bi {
 			}
 			// fx 比 last 更极端 → 触发笔修正
 			if pending != nil && moreExtreme(*pending, *prev) {
-				// Case 2：pending 比 prev 更极端。把 prev 换成 pending、
-				// 丢弃旧 last，fx 作为新候选反向分型，再校核成笔
+				// Case 2：pending 比 prev 更极端。先用 pending 顶替 prev、
+				// 丢弃旧 last，再从 pending 之后的所有分型重新检查一遍是否
+				// 成笔（用 i = pendingIdx，下一轮 i++ 自然跳到 pending 后第一根）
+				savedIdx := pendingIdx
 				*prev = *pending
 				endpoints = endpoints[:len(endpoints)-1]
-				tmp := fx
-				pending = &tmp
-				newLast := &endpoints[len(endpoints)-1]
-				if biRulesSatisfied(*newLast, *pending) {
-					endpoints = append(endpoints, *pending)
-					pending = nil
-				}
+				clearPending()
+				i = savedIdx
 				continue
 			}
 			// Case 1：仅延伸 last（pending 不构成对 prev 的威胁）
 			*last = fx
-			pending = nil
+			clearPending()
 			continue
 		}
 
 		// 反向类型：维护 pending 为最极端，规则通过即追加为端点
-		if pending == nil {
-			tmp := fx
-			pending = &tmp
-		} else if moreExtreme(fx, *pending) {
-			tmp := fx
-			pending = &tmp
+		if pending == nil || moreExtreme(fx, *pending) {
+			setPending(fx, i)
 		}
 		if biRulesSatisfied(*last, *pending) {
 			endpoints = append(endpoints, *pending)
-			pending = nil
+			clearPending()
 		}
 	}
 
