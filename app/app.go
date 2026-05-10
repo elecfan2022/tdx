@@ -106,11 +106,11 @@ type KlineWithChan struct {
 // GetKline 拉取最近 count 根 K 线，附带缠论分型与笔
 // 数据来源由 useRealtime / useLocal 决定：
 //   - 仅 useRealtime：从行情服务器实时拉取，count 上限 8000
-//   - 仅 useLocal：从通达信本地 .day 文件读取（需在"设置"里填好通达信目录），
-//     count 上限 20000；cutoffDate（YYYY-MM-DD）非空时只取截止到该日的数据
+//   - 仅 useLocal：从通达信本地文件读取（日/周/月走 .day，1m 走 .lc1，5m/30m
+//     走 .lc5），count 上限 20000；cutoffDate（YYYY-MM-DD）非空时只取截止
+//     到该日的数据
 //   - 同时勾选：先读本地，再用行情服务器把"本地最后一根之后"的实时数据补齐，
 //     总长度上限 20000
-// 分钟周期（1m/5m/30m）的本地读取暂未实现，会自动 fallback 到实时
 func (a *App) GetKline(code string, period string, count int, useRealtime, useLocal bool, cutoffDate string) (*KlineWithChan, error) {
 	if !useRealtime && !useLocal {
 		// 兼容旧前端：什么都没勾默认走实时
@@ -124,15 +124,6 @@ func (a *App) GetKline(code string, period string, count int, useRealtime, useLo
 	}
 	if count <= 0 || count > maxCount {
 		count = maxCount
-	}
-
-	// 分钟周期目前不支持本地，强制 fallback
-	minutePeriods := period == "1m" || period == "5m" || period == "30m"
-	if useLocal && minutePeriods {
-		useLocal = false
-		if !useRealtime {
-			useRealtime = true
-		}
 	}
 
 	var klines []KlineBar
@@ -209,24 +200,52 @@ func (a *App) fetchRealtime(code, period string, count int) ([]KlineBar, error) 
 	return out, nil
 }
 
-// fetchLocal 从通达信本地 .day 文件读取 K 线
-// cutoffDate 非空时只保留截止到该日的 K 线（含当日）
-// 周/月线用日 K 聚合得到
+// fetchLocal 从通达信本地文件读取 K 线
+//   - day/week/month 走 .day 文件，周/月用日 K 聚合
+//   - 1m 走 .lc1，5m 走 .lc5，30m 用 5m 文件按"日内每 6 根"聚合
+//   - cutoffDate 非空时只保留截止到该日的 K 线（含当日）
 func (a *App) fetchLocal(code, period string, count int, cutoffDate string) ([]KlineBar, error) {
 	tdxDir := a.GetSettings().TdxDir
 	if tdxDir == "" {
 		return nil, fmt.Errorf("未设置通达信目录，请先在菜单栏「设置」里填写")
 	}
-	path, err := tdxDayFilePath(tdxDir, code)
-	if err != nil {
-		return nil, err
-	}
-	daily, err := readTdxDayFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("读本地日 K 失败 (%s): %w", path, err)
+
+	// 先把原始 K 线读出来（不同周期用不同文件）
+	var raw []KlineBar
+	var err error
+	switch period {
+	case "day", "week", "month":
+		path, perr := tdxDayFilePath(tdxDir, code)
+		if perr != nil {
+			return nil, perr
+		}
+		raw, err = readTdxDayFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读本地日 K 失败 (%s): %w", path, err)
+		}
+	case "1m":
+		path, perr := tdxMinuteFilePath(tdxDir, code, "1m")
+		if perr != nil {
+			return nil, perr
+		}
+		raw, err = readTdxMinuteFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读本地 1 分钟 K 失败 (%s): %w", path, err)
+		}
+	case "5m", "30m":
+		path, perr := tdxMinuteFilePath(tdxDir, code, "5m")
+		if perr != nil {
+			return nil, perr
+		}
+		raw, err = readTdxMinuteFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("读本地 5 分钟 K 失败 (%s): %w", path, err)
+		}
+	default:
+		return nil, fmt.Errorf("本地数据暂不支持周期 %s", period)
 	}
 
-	// 按 cutoffDate 截断
+	// 按 cutoffDate 截断（含当日）
 	if cutoffDate != "" {
 		loc, _ := time.LoadLocation("Asia/Shanghai")
 		if loc == nil {
@@ -236,29 +255,27 @@ func (a *App) fetchLocal(code, period string, count int, cutoffDate string) ([]K
 		if perr != nil {
 			return nil, fmt.Errorf("截至日期格式错误（应为 YYYY-MM-DD）: %w", perr)
 		}
-		// 包含当日：用 24:00（次日零点）作为上界
 		cutoffMs := cutoff.AddDate(0, 0, 1).UnixMilli()
-		filtered := daily[:0:0]
-		for i := range daily {
-			if daily[i].Timestamp < cutoffMs {
-				filtered = append(filtered, daily[i])
+		filtered := raw[:0:0]
+		for i := range raw {
+			if raw[i].Timestamp < cutoffMs {
+				filtered = append(filtered, raw[i])
 			}
 		}
-		daily = filtered
+		raw = filtered
 	}
 
-	// 转换周期
+	// 周期聚合
 	var ks []KlineBar
 	switch period {
-	case "day":
-		ks = daily
+	case "day", "1m", "5m":
+		ks = raw
 	case "week":
-		ks = aggregateDailyToWeekly(daily)
+		ks = aggregateDailyToWeekly(raw)
 	case "month":
-		ks = aggregateDailyToMonthly(daily)
-	default:
-		// 分钟周期理论上不会走到这里（GetKline 已 fallback），保险兜底
-		return nil, fmt.Errorf("本地数据暂不支持周期 %s", period)
+		ks = aggregateDailyToMonthly(raw)
+	case "30m":
+		ks = aggregate5MinTo30Min(raw)
 	}
 
 	// 截断到 count 根（保留最近的）

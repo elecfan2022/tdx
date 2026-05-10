@@ -315,6 +315,13 @@ onBeforeUnmount(() => {
               @change="loadKline"
               @keyup.enter="loadKline"
             />
+            <button
+              class="display-cutoff-clear"
+              title="清空截至日期"
+              @click="() => { cutoffDate = ''; loadKline() }"
+            >
+              ×
+            </button>
           </div>
         </div>
       </div>
@@ -525,6 +532,24 @@ html, body, #app {
 .display-cutoff-input:focus {
   outline: none;
   border-color: #2563eb;
+}
+.display-cutoff-clear {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  background: #334155;
+  color: #cbd5e1;
+  border: 1px solid #475569;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.display-cutoff-clear:hover {
+  background: #ef4444;
+  color: #fff;
+  border-color: #ef4444;
 }
 
 /* 设置下拉 */
