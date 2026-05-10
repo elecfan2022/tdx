@@ -230,7 +230,7 @@ func moreExtreme(fx, base Fractal) bool {
 //
 //  2. 锁定后切换到贪心 + 笔修正：
 //     - 反向 fx：维护 pending 为最极端反向分型，规则通过即追加为新端点。
-//     - 同向更极端 fx：触发"笔修正"，分两种情况——
+//     - 同向更极端 fx：触发"笔修正"，分三种情况——
 //       * Case 1（pending 不比 prev 更极端）：仅延伸 last，pending 弃。
 //          直观含义：上一笔还未走完，新的更极端端点出现，但中间反向分型不够强
 //          以撼动 prev → 直接把 last 平移到 fx。
@@ -241,6 +241,11 @@ func moreExtreme(fx, base Fractal) bool {
 //          的"边"被改写后，pending 之后的所有分型必须以新边为起点重新审视。
 //          这正是"分型可修改性"——一旦笔的端点变了，后面挂在 pending 但因
 //          rule 失败没成笔的分型，可能在新链路下成笔。
+//       * Case 3（Case 2 回退重扫的兜底）：如果从新 prev（即原 pending，更极端
+//         的反向分型）开始扫描到原触发 fx 这段范围内，没能再成任何一笔，就
+//         直接把"新 prev → 触发 fx"定为一笔。即即便不严格满足新笔三规则（最
+//         常见的是规则 1/2 的距离不足），也要承认这条修正后的笔——否则一对
+//         更极端的反向极值就会因为之间缺乏中继分型而被永久"吃掉"。
 //
 // 参考：
 //   《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》——相邻两分型
@@ -261,6 +266,12 @@ func buildBi(fractals []Fractal) []Bi {
 	var candA, candB *Fractal // 仅在 endpoints 为空时使用
 	var pending *Fractal      // 锁定后使用
 	pendingIdx := -1          // pending 在 fractals 切片里的位置，case 2 回退用
+
+	// Case 3 兜底：Case 2 触发时记录原触发 fx 的下标 + rewind 后的 endpoints 长度。
+	// 主循环扫到 rewindTriggerIdx 时，若 endpoints 长度未增长（重扫期间没成新笔），
+	// 就强制把触发 fx append 为端点。
+	rewindTriggerIdx := -1
+	rewindBaseLen := -1
 
 	clearPending := func() {
 		pending = nil
@@ -284,6 +295,23 @@ func buildBi(fractals []Fractal) []Bi {
 
 	for i := 0; i < len(fractals); i++ {
 		fx := fractals[i]
+
+		// Case 3 兜底：Case 2 重扫到达原触发 fx 时，若 endpoints 没增长，
+		// 强制把 fx 当端点（不再校验 biRulesSatisfied）。
+		if rewindTriggerIdx >= 0 && i == rewindTriggerIdx {
+			if len(endpoints) == rewindBaseLen && len(endpoints) >= 1 {
+				last := endpoints[len(endpoints)-1]
+				if fx.Type != last.Type {
+					endpoints = append(endpoints, fx)
+					clearPending()
+					rewindTriggerIdx = -1
+					rewindBaseLen = -1
+					continue
+				}
+			}
+			rewindTriggerIdx = -1
+			rewindBaseLen = -1
+		}
 
 		switch {
 		case len(endpoints) == 0:
@@ -349,8 +377,12 @@ func buildBi(fractals []Fractal) []Bi {
 			if pending != nil && moreExtreme(*pending, *prev) {
 				// Case 2：pending 比 prev 更极端。先用 pending 顶替 prev、
 				// 丢弃旧 last，再从 pending 之后的所有分型重新检查一遍是否
-				// 成笔（用 i = pendingIdx，下一轮 i++ 自然跳到 pending 后第一根）
+				// 成笔（用 i = pendingIdx，下一轮 i++ 自然跳到 pending 后第一根）。
+				// 同时记录 rewindTriggerIdx = 当前 i（触发 fx 在 fractals 中的位置）
+				// 与 rewindBaseLen = rewind 后 endpoints 长度，给 Case 3 用。
 				savedIdx := pendingIdx
+				rewindTriggerIdx = i
+				rewindBaseLen = len(endpoints) - 1
 				*prev = *pending
 				endpoints = endpoints[:len(endpoints)-1]
 				clearPending()
