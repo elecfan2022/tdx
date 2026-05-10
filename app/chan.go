@@ -184,6 +184,18 @@ func absInt(x int) int {
 //     —— 即顶 K 线的最高价必须严格高于底 K 线的最高价（否则两 K 线区间
 //     完全反置或重叠在底 K 线之内，不构成"上有下"的笔）
 //
+// 大幅跳空缺口豁免：
+//
+//	若 earlier.PeakIdx 到 later.PeakIdx 之间存在任意一对相邻 K 线，区间不
+//	重叠（K[i+1].Low > K[i].High 或 K[i+1].High < K[i].Low）且缺口尺寸 >=
+//	相邻两根 K 线幅度（High-Low）较大者的 2 倍，即视为大幅跳空缺口。缺口
+//	本身在缠论里相当于一段"被压缩的剧烈走势"，规则 1、2 的根数限制放宽，
+//	只要规则 3 通过即可成笔。较小的跳空（如盘中两根紧挨着的小不重叠区间）
+//	不享受此豁免。规则 3 始终生效。
+//	典型用例：上证指数 999999 1 分钟图，T(2007-05-29 15:00) 与 B(2007-05-30
+//	09:31) 因 530 印花税政策跨夜跳空，缺口约 280 点远大于相邻 K 线 ~30 点
+//	的幅度，达到 2 倍以上，判定成笔。
+//
 // 规则 2 的 PeakIdx 实现是从下面这个测例发现的 bug 修过来的：
 // 用例参考《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》
 //   - 标的：上证指数 999999 月线
@@ -191,26 +203,65 @@ func absInt(x int) int {
 //   - 旧实现用合并块边界 OrigEnd/OrigStart 计数，若 1991-01 因包含合并把
 //     1991-02 吞入（OrigEnd=2），算出的 between=5-2-1=2 < 3，错判为不成笔
 //   - 新实现用真实峰/谷的 PeakIdx 计数：5-1-1=3，正确成笔
-func biRulesSatisfied(a, b Fractal) bool {
-	if absInt(a.Index-b.Index) < 3 {
-		return false
-	}
+func biRulesSatisfied(a, b Fractal, klines []KlineBar) bool {
 	earlier, later := a, b
 	if earlier.PeakIdx > later.PeakIdx {
 		earlier, later = b, a
 	}
-	between := later.PeakIdx - earlier.PeakIdx - 1
-	if between < 3 {
-		return false
-	}
-	// 规则 3：顶 K 线最高价必须高于底 K 线最高价
+
+	// 规则 3 始终需要：顶 K 线最高价必须高于底 K 线最高价
 	var top, bottom Fractal
 	if a.Type == "top" {
 		top, bottom = a, b
 	} else {
 		top, bottom = b, a
 	}
-	return top.KHigh > bottom.KHigh
+	if top.KHigh <= bottom.KHigh {
+		return false
+	}
+
+	// 大幅跳空缺口豁免规则 1、2 的根数限制
+	if hasLargeGapBetween(earlier, later, klines) {
+		return true
+	}
+
+	// 无缺口：常规距离规则
+	if absInt(a.Index-b.Index) < 3 {
+		return false
+	}
+	between := later.PeakIdx - earlier.PeakIdx - 1
+	return between >= 3
+}
+
+// hasLargeGapBetween 检测 earlier.PeakIdx ~ later.PeakIdx 之间是否存在大幅
+// 跳空缺口：任意相邻两根 K 线区间不重叠（K[i+1].Low > K[i].High 或 K[i+1].High
+// < K[i].Low），且缺口尺寸 >= 2 * max(K[i].幅度, K[i+1].幅度)。
+func hasLargeGapBetween(earlier, later Fractal, klines []KlineBar) bool {
+	if earlier.PeakIdx > later.PeakIdx {
+		earlier, later = later, earlier
+	}
+	for i := earlier.PeakIdx; i < later.PeakIdx && i+1 < len(klines); i++ {
+		a, b := klines[i], klines[i+1]
+		var gap float64
+		switch {
+		case b.Low > a.High:
+			gap = b.Low - a.High
+		case b.High < a.Low:
+			gap = a.Low - b.High
+		default:
+			continue // 区间重叠，无缺口
+		}
+		rangeA := a.High - a.Low
+		rangeB := b.High - b.Low
+		maxRange := rangeA
+		if rangeB > maxRange {
+			maxRange = rangeB
+		}
+		if gap >= 2*maxRange {
+			return true
+		}
+	}
+	return false
 }
 
 // moreExtreme 判断 fx 是否比 base 更极端（顶看更高、底看更低）
@@ -242,10 +293,14 @@ func moreExtreme(fx, base Fractal) bool {
 //          这正是"分型可修改性"——一旦笔的端点变了，后面挂在 pending 但因
 //          rule 失败没成笔的分型，可能在新链路下成笔。
 //       * Case 3（Case 2 回退重扫的兜底）：如果从新 prev（即原 pending，更极端
-//         的反向分型）开始扫描到原触发 fx 这段范围内，没能再成任何一笔，就
-//         直接把"新 prev → 触发 fx"定为一笔。即即便不严格满足新笔三规则（最
-//         常见的是规则 1/2 的距离不足），也要承认这条修正后的笔——否则一对
-//         更极端的反向极值就会因为之间缺乏中继分型而被永久"吃掉"。
+//         的反向分型）开始扫描到原触发 fx 这段范围内，没能再成任何一笔，则
+//         以"放宽规则集"判定"新 prev → 触发 fx"是否成笔——
+//           - 规则 3 必须满足（top.KHigh > bottom.KHigh，确保"上有下"）
+//           - 规则 1 必须满足（处理后下标距离 ≥ 3），否则需大幅跳空缺口豁免
+//           - 规则 2 不要求（之间没有中继分型是 Case 3 的前提条件）
+//         规则 1 失败且无大幅缺口则不强制成笔。这避免新 prev 与触发 fx 紧挨着
+//         又无缺口时硬连成笔；同时保留"经 Case 2 修正确认、相距足够远"或
+//         "之间存在大幅跳空"的极值对的成笔机会。
 //
 // 参考：
 //   《缠中说禅 · 教你炒股票 69：月线分段与上海大走势分析、预判》——相邻两分型
@@ -257,7 +312,7 @@ func moreExtreme(fx, base Fractal) bool {
 //   - 301153 日线，B(2025-04-07) 与 T(2025-04-03) 之间无法成笔；T(2025-07-14)
 //     更高的顶 + B(04-07) 更低的底触发 case 2，回退后从 B(04-07) 重新扫到
 //     T(07-14)，得到 B(04-07)→T(06-25)→B(07-03)→T(07-14) 三笔。
-func buildBi(fractals []Fractal) []Bi {
+func buildBi(fractals []Fractal, klines []KlineBar) []Bi {
 	if len(fractals) < 2 {
 		return nil
 	}
@@ -297,16 +352,28 @@ func buildBi(fractals []Fractal) []Bi {
 		fx := fractals[i]
 
 		// Case 3 兜底：Case 2 重扫到达原触发 fx 时，若 endpoints 没增长，
-		// 强制把 fx 当端点（不再校验 biRulesSatisfied）。
+		// 用放宽规则集判定 last → fx：规则 3 必须满足，规则 1 必须满足
+		// （或大幅跳空缺口豁免），规则 2 不要求。
 		if rewindTriggerIdx >= 0 && i == rewindTriggerIdx {
 			if len(endpoints) == rewindBaseLen && len(endpoints) >= 1 {
 				last := endpoints[len(endpoints)-1]
 				if fx.Type != last.Type {
-					endpoints = append(endpoints, fx)
-					clearPending()
-					rewindTriggerIdx = -1
-					rewindBaseLen = -1
-					continue
+					var top, bottom Fractal
+					if last.Type == "top" {
+						top, bottom = last, fx
+					} else {
+						top, bottom = fx, last
+					}
+					rule3 := top.KHigh > bottom.KHigh
+					rule1 := absInt(last.Index-fx.Index) >= 3
+					gapExempt := hasLargeGapBetween(last, fx, klines)
+					if rule3 && (rule1 || gapExempt) {
+						endpoints = append(endpoints, fx)
+						clearPending()
+						rewindTriggerIdx = -1
+						rewindBaseLen = -1
+						continue
+					}
 				}
 			}
 			rewindTriggerIdx = -1
@@ -326,7 +393,7 @@ func buildBi(fractals []Fractal) []Bi {
 				if moreExtreme(fx, *candA) {
 					tmp := fx
 					candA = &tmp
-					if candB != nil && biRulesSatisfied(*candB, *candA) {
+					if candB != nil && biRulesSatisfied(*candB, *candA, klines) {
 						confirmFirstPair(*candA, *candB)
 					}
 				}
@@ -340,7 +407,7 @@ func buildBi(fractals []Fractal) []Bi {
 				tmp := fx
 				candB = &tmp
 			}
-			if biRulesSatisfied(*candA, *candB) {
+			if biRulesSatisfied(*candA, *candB, klines) {
 				confirmFirstPair(*candA, *candB)
 			}
 			continue
@@ -358,7 +425,7 @@ func buildBi(fractals []Fractal) []Bi {
 			if pending == nil || moreExtreme(fx, *pending) {
 				setPending(fx, i)
 			}
-			if biRulesSatisfied(*last, *pending) {
+			if biRulesSatisfied(*last, *pending, klines) {
 				endpoints = append(endpoints, *pending)
 				clearPending()
 			}
@@ -399,7 +466,7 @@ func buildBi(fractals []Fractal) []Bi {
 		if pending == nil || moreExtreme(fx, *pending) {
 			setPending(fx, i)
 		}
-		if biRulesSatisfied(*last, *pending) {
+		if biRulesSatisfied(*last, *pending, klines) {
 			endpoints = append(endpoints, *pending)
 			clearPending()
 		}
@@ -427,7 +494,7 @@ func AnalyzeChan(klines []KlineBar) ChanAnalysis {
 	}
 	processed := processContainment(klines)
 	fractals := findFractals(processed, klines)
-	bis := buildBi(fractals)
+	bis := buildBi(fractals, klines)
 	if fractals == nil {
 		fractals = []Fractal{}
 	}
