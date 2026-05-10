@@ -86,6 +86,10 @@ func loadCachedNames() map[string]string {
 }
 
 // buildLocalCodes 扫描 + 合并名称，返回填好 ICodes 的实例
+//
+// 名称来源优先级：
+//  1. 通达信 .tnf 文件（T0002/hq_cache/shm.tnf 等，主要源）
+//  2. ./data/database/codes.db（之前实时拉过的 sqlite 缓存，兜底）
 func buildLocalCodes(tdxDir string) (tdx.ICodes, int, error) {
 	list, err := loadLocalCodes(tdxDir)
 	if err != nil {
@@ -94,7 +98,14 @@ func buildLocalCodes(tdxDir string) (tdx.ICodes, int, error) {
 	if len(list) == 0 {
 		return nil, 0, fmt.Errorf("local tdx dir %q has no .day files", tdxDir)
 	}
-	nameMap := loadCachedNames()
+	// 1. 先 .tnf
+	nameMap := loadTnfNames(tdxDir)
+	// 2. sqlite 缓存补未覆盖的
+	for k, v := range loadCachedNames() {
+		if _, ok := nameMap[k]; !ok {
+			nameMap[k] = v
+		}
+	}
 	for _, cm := range list {
 		if name, ok := nameMap[cm.FullCode()]; ok {
 			cm.Name = name
