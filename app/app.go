@@ -35,7 +35,23 @@ func (a *App) startup(ctx context.Context) {
 	go a.initCodes()
 }
 
+// initCodes 初始化代码字典：
+//   - 若已设置通达信目录：扫描 vipdoc/<exch>/lday/*.day 取代码（毫秒级），
+//     并尝试用 ./data/database/codes.db 之前实时拉过的名称合并
+//   - 否则：走 tdx.NewCodes()（首次会从行情服务器下载，约 5-15 秒）
 func (a *App) initCodes() {
+	tdxDir := a.GetSettings().TdxDir
+	if tdxDir != "" {
+		if cb, _, err := buildLocalCodes(tdxDir); err == nil {
+			a.codesMu.Lock()
+			a.codes = cb
+			a.codesErr = nil
+			a.codesReady = true
+			a.codesMu.Unlock()
+			return
+		}
+		// 本地失败 → fallback 到网络模式
+	}
 	cs, err := tdx.NewCodes()
 	a.codesMu.Lock()
 	defer a.codesMu.Unlock()

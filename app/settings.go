@@ -56,6 +56,7 @@ func (a *App) GetSettings() Settings {
 }
 
 // SetTdxDir 修改通达信目录并落盘
+// 改完后台异步重新初始化代码字典（如果新目录有效，会用本地扫描；否则走网络）
 func (a *App) SetTdxDir(dir string) (Settings, error) {
 	settings.load()
 	settings.mu.Lock()
@@ -66,5 +67,6 @@ func (a *App) SetTdxDir(dir string) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	go a.initCodes()
 	return out, nil
 }
