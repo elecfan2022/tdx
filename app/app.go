@@ -104,13 +104,64 @@ type KlineWithChan struct {
 }
 
 // GetKline 拉取最近 count 根 K 线，附带缠论分型与笔
-// TDX 单次上限 800，超过会自动分页（最多 24000 根）
-func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, error) {
-	if count <= 0 {
-		count = 5000
+// 数据来源由 useRealtime / useLocal 决定：
+//   - 仅 useRealtime：从行情服务器实时拉取，count 上限 8000
+//   - 仅 useLocal：从通达信本地 .day 文件读取（需在"设置"里填好通达信目录），
+//     count 上限 20000；cutoffDate（YYYY-MM-DD）非空时只取截止到该日的数据
+//   - 同时勾选：先读本地，再用行情服务器把"本地最后一根之后"的实时数据补齐，
+//     总长度上限 20000
+// 分钟周期（1m/5m/30m）的本地读取暂未实现，会自动 fallback 到实时
+func (a *App) GetKline(code string, period string, count int, useRealtime, useLocal bool, cutoffDate string) (*KlineWithChan, error) {
+	if !useRealtime && !useLocal {
+		// 兼容旧前端：什么都没勾默认走实时
+		useRealtime = true
 	}
-	if count > 24000 {
-		count = 24000
+
+	// 上限：纯实时 8000，含本地 20000
+	maxCount := 8000
+	if useLocal {
+		maxCount = 20000
+	}
+	if count <= 0 || count > maxCount {
+		count = maxCount
+	}
+
+	// 分钟周期目前不支持本地，强制 fallback
+	minutePeriods := period == "1m" || period == "5m" || period == "30m"
+	if useLocal && minutePeriods {
+		useLocal = false
+		if !useRealtime {
+			useRealtime = true
+		}
+	}
+
+	var klines []KlineBar
+	var err error
+	switch {
+	case useLocal && useRealtime:
+		klines, err = a.fetchLocalThenRealtime(code, period, count, cutoffDate)
+	case useLocal:
+		klines, err = a.fetchLocal(code, period, count, cutoffDate)
+	default:
+		klines, err = a.fetchRealtime(code, period, count)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	chan_ := AnalyzeChan(klines)
+	return &KlineWithChan{
+		Klines:   klines,
+		Fractals: chan_.Fractals,
+		Bis:      chan_.Bis,
+	}, nil
+}
+
+// fetchRealtime 从行情服务器拉取 count 根 K 线（按时间正序）
+// TDX 单次上限 800，超过自动分页
+func (a *App) fetchRealtime(code, period string, count int) ([]KlineBar, error) {
+	if count <= 0 {
+		return nil, nil
 	}
 	t, err := periodToType(period)
 	if err != nil {
@@ -120,9 +171,6 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 	if err != nil {
 		return nil, fmt.Errorf("连接行情服务器失败: %w", err)
 	}
-
-	// 指数（如上证 999999、000001、深成指 399001 等）和股票请求帧一样，
-	// 但服务端响应的解析方式不同，需要分别走 GetIndex / GetKline
 	isIndex := protocol.IsIndex(protocol.AddPrefix(code))
 
 	const batch = uint16(800)
@@ -141,14 +189,11 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 		if err != nil {
 			return nil, fmt.Errorf("拉取K线失败: %w", err)
 		}
-		// 协议返回的是按时间正序的一段，把它接到已收集片段的前面
 		collected = append(resp.List, collected...)
-		// 实际返回不足 size，说明已经拿到最早数据
 		if resp.Count < size {
 			break
 		}
 	}
-
 	out := make([]KlineBar, 0, len(collected))
 	for _, k := range collected {
 		out = append(out, KlineBar{
@@ -161,12 +206,100 @@ func (a *App) GetKline(code string, period string, count int) (*KlineWithChan, e
 			Turnover:  k.Amount.Float64(),
 		})
 	}
-	chan_ := AnalyzeChan(out)
-	return &KlineWithChan{
-		Klines:   out,
-		Fractals: chan_.Fractals,
-		Bis:      chan_.Bis,
-	}, nil
+	return out, nil
+}
+
+// fetchLocal 从通达信本地 .day 文件读取 K 线
+// cutoffDate 非空时只保留截止到该日的 K 线（含当日）
+// 周/月线用日 K 聚合得到
+func (a *App) fetchLocal(code, period string, count int, cutoffDate string) ([]KlineBar, error) {
+	tdxDir := a.GetSettings().TdxDir
+	if tdxDir == "" {
+		return nil, fmt.Errorf("未设置通达信目录，请先在菜单栏「设置」里填写")
+	}
+	path, err := tdxDayFilePath(tdxDir, code)
+	if err != nil {
+		return nil, err
+	}
+	daily, err := readTdxDayFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读本地日 K 失败 (%s): %w", path, err)
+	}
+
+	// 按 cutoffDate 截断
+	if cutoffDate != "" {
+		loc, _ := time.LoadLocation("Asia/Shanghai")
+		if loc == nil {
+			loc = time.FixedZone("CST", 8*3600)
+		}
+		cutoff, perr := time.ParseInLocation("2006-01-02", cutoffDate, loc)
+		if perr != nil {
+			return nil, fmt.Errorf("截至日期格式错误（应为 YYYY-MM-DD）: %w", perr)
+		}
+		// 包含当日：用 24:00（次日零点）作为上界
+		cutoffMs := cutoff.AddDate(0, 0, 1).UnixMilli()
+		filtered := daily[:0:0]
+		for i := range daily {
+			if daily[i].Timestamp < cutoffMs {
+				filtered = append(filtered, daily[i])
+			}
+		}
+		daily = filtered
+	}
+
+	// 转换周期
+	var ks []KlineBar
+	switch period {
+	case "day":
+		ks = daily
+	case "week":
+		ks = aggregateDailyToWeekly(daily)
+	case "month":
+		ks = aggregateDailyToMonthly(daily)
+	default:
+		// 分钟周期理论上不会走到这里（GetKline 已 fallback），保险兜底
+		return nil, fmt.Errorf("本地数据暂不支持周期 %s", period)
+	}
+
+	// 截断到 count 根（保留最近的）
+	if count > 0 && len(ks) > count {
+		ks = ks[len(ks)-count:]
+	}
+	return ks, nil
+}
+
+// fetchLocalThenRealtime 先读本地，再用实时数据补齐"本地最后一根之后"的部分
+func (a *App) fetchLocalThenRealtime(code, period string, count int, cutoffDate string) ([]KlineBar, error) {
+	local, err := a.fetchLocal(code, period, count, cutoffDate)
+	if err != nil {
+		// 本地失败：fallback 实时
+		rt, rerr := a.fetchRealtime(code, period, count)
+		if rerr != nil {
+			return nil, fmt.Errorf("本地失败 (%v) 且实时失败: %w", err, rerr)
+		}
+		return rt, nil
+	}
+	if len(local) == 0 {
+		return a.fetchRealtime(code, period, count)
+	}
+	// 拉一段实时（足够覆盖本地→现在的间隔即可，不必把 count 拉满）
+	rt, err := a.fetchRealtime(code, period, 800)
+	if err != nil {
+		// 实时失败：单返回本地
+		return local, nil
+	}
+	lastLocal := local[len(local)-1].Timestamp
+	combined := make([]KlineBar, 0, len(local)+len(rt))
+	combined = append(combined, local...)
+	for _, k := range rt {
+		if k.Timestamp > lastLocal {
+			combined = append(combined, k)
+		}
+	}
+	if count > 0 && len(combined) > count {
+		combined = combined[len(combined)-count:]
+	}
+	return combined, nil
 }
 
 // BiDiagnosis 笔成立诊断结果，给前端控制台打印用
@@ -195,7 +328,7 @@ func (a *App) DiagnoseBi(code, period, fromDate, toDate string) (*BiDiagnosis, e
 		return time.UnixMilli(ts).In(loc).Format("2006-01-02")
 	}
 
-	resp, err := a.GetKline(code, period, 5000)
+	resp, err := a.GetKline(code, period, 5000, true, false, "")
 	if err != nil {
 		return nil, err
 	}

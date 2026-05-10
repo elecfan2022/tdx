@@ -6,7 +6,9 @@ export function AddToWatchlist(arg1:string):Promise<Array<main.WatchItem>>;
 
 export function DiagnoseBi(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.BiDiagnosis>;
 
-export function GetKline(arg1:string,arg2:string,arg3:number):Promise<main.KlineWithChan>;
+export function GetKline(arg1:string,arg2:string,arg3:number,arg4:boolean,arg5:boolean,arg6:string):Promise<main.KlineWithChan>;
+
+export function GetSettings():Promise<main.Settings>;
 
 export function GetStatus():Promise<main.Status>;
 
@@ -17,3 +19,5 @@ export function GetWatchlist():Promise<Array<main.WatchItem>>;
 export function RemoveFromWatchlist(arg1:string):Promise<Array<main.WatchItem>>;
 
 export function ReorderWatchlist(arg1:Array<string>):Promise<Array<main.WatchItem>>;
+
+export function SetTdxDir(arg1:string):Promise<main.Settings>;

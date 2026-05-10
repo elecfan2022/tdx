@@ -10,8 +10,12 @@ export function DiagnoseBi(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['DiagnoseBi'](arg1, arg2, arg3, arg4);
 }
 
-export function GetKline(arg1, arg2, arg3) {
-  return window['go']['main']['App']['GetKline'](arg1, arg2, arg3);
+export function GetKline(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['GetKline'](arg1, arg2, arg3, arg4, arg5, arg6);
+}
+
+export function GetSettings() {
+  return window['go']['main']['App']['GetSettings']();
 }
 
 export function GetStatus() {
@@ -32,4 +36,8 @@ export function RemoveFromWatchlist(arg1) {
 
 export function ReorderWatchlist(arg1) {
   return window['go']['main']['App']['ReorderWatchlist'](arg1);
+}
+
+export function SetTdxDir(arg1) {
+  return window['go']['main']['App']['SetTdxDir'](arg1);
 }

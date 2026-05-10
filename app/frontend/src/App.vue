@@ -50,17 +50,75 @@ const chartRef = ref<InstanceType<typeof KChart> | null>(null)
 // 主图缠论显示开关（独立勾选，可同时关掉两个）
 const showFractals = ref(true)
 const showBis = ref(true)
+
+// 数据来源选择（至少勾一个；都勾即"本地+实时补齐"模式）
+const useRealtime = ref(true)
+const useLocal = ref(false)
+const cutoffDate = ref('') // YYYY-MM-DD，仅在 useLocal 时显示
+
 const showDisplayMenu = ref(false)
 const displayMenuRef = ref<HTMLDivElement | null>(null)
+
+// 防止两个数据源都被取消勾选
+function ensureAtLeastOneSource(changed: 'realtime' | 'local') {
+  if (!useRealtime.value && !useLocal.value) {
+    // 用户刚刚取消的那个，强制保留另一个
+    if (changed === 'realtime') {
+      useLocal.value = true
+    } else {
+      useRealtime.value = true
+    }
+  }
+  loadKline()
+}
 
 function toggleDisplayMenu() {
   showDisplayMenu.value = !showDisplayMenu.value
 }
 
+// 设置下拉
+const showSettingsMenu = ref(false)
+const settingsMenuRef = ref<HTMLDivElement | null>(null)
+const tdxDirInput = ref('')
+const tdxDirSaved = ref('')
+const settingsMsg = ref('')
+
+function toggleSettingsMenu() {
+  showSettingsMenu.value = !showSettingsMenu.value
+  if (showSettingsMenu.value) {
+    // 打开时同步当前已保存值，避免刚改一半被覆盖
+    tdxDirInput.value = tdxDirSaved.value
+    settingsMsg.value = ''
+  }
+}
+
+async function loadSettings() {
+  try {
+    const s = await window.go.main.App.GetSettings()
+    tdxDirSaved.value = s?.tdxDir ?? ''
+    tdxDirInput.value = tdxDirSaved.value
+  } catch {
+    /* ignore */
+  }
+}
+
+async function saveTdxDir() {
+  try {
+    const s = await window.go.main.App.SetTdxDir(tdxDirInput.value.trim())
+    tdxDirSaved.value = s?.tdxDir ?? ''
+    settingsMsg.value = '已保存'
+  } catch (e: any) {
+    settingsMsg.value = '错误：' + String(e?.message ?? e)
+  }
+}
+
 function onDocClick(e: MouseEvent) {
-  if (!showDisplayMenu.value) return
-  if (displayMenuRef.value && !displayMenuRef.value.contains(e.target as Node)) {
+  const target = e.target as Node
+  if (showDisplayMenu.value && displayMenuRef.value && !displayMenuRef.value.contains(target)) {
     showDisplayMenu.value = false
+  }
+  if (showSettingsMenu.value && settingsMenuRef.value && !settingsMenuRef.value.contains(target)) {
+    showSettingsMenu.value = false
   }
 }
 
@@ -102,9 +160,16 @@ async function loadKline() {
   const token = ++klineToken
   const reqCode = code.value
   const reqPeriod = period.value
+  const reqUseRealtime = useRealtime.value
+  const reqUseLocal = useLocal.value
+  const reqCutoff = useLocal.value ? cutoffDate.value.trim() : ''
+  // 数量上限：纯实时 8000，含本地 20000
+  const reqCount = reqUseLocal ? 20000 : 8000
   statusMsg.value = '加载中…'
   try {
-    const resp = await window.go.main.App.GetKline(reqCode, reqPeriod, 5000)
+    const resp = await window.go.main.App.GetKline(
+      reqCode, reqPeriod, reqCount, reqUseRealtime, reqUseLocal, reqCutoff,
+    )
     if (token !== klineToken) return // 已有更新的请求在路上，丢弃此次结果
     const list = resp?.klines ?? []
     data.value = list.map((b: any): KLineData => ({
@@ -175,6 +240,7 @@ onMounted(() => {
   refreshStatus()
   loadName()
   loadKline()
+  loadSettings()
   statusTimer = window.setInterval(refreshStatus, 3000)
   document.addEventListener('click', onDocClick)
 })
@@ -223,6 +289,56 @@ onBeforeUnmount(() => {
             <input type="checkbox" v-model="showBis" />
             <span>笔</span>
           </label>
+          <div class="display-divider" />
+          <label class="display-opt">
+            <input
+              type="checkbox"
+              :checked="useRealtime"
+              @change="(e) => { useRealtime = (e.target as HTMLInputElement).checked; ensureAtLeastOneSource('realtime') }"
+            />
+            <span>实时数据</span>
+          </label>
+          <label class="display-opt">
+            <input
+              type="checkbox"
+              :checked="useLocal"
+              @change="(e) => { useLocal = (e.target as HTMLInputElement).checked; ensureAtLeastOneSource('local') }"
+            />
+            <span>本地数据</span>
+          </label>
+          <div v-if="useLocal" class="display-cutoff">
+            <label class="display-cutoff-label">截至日期</label>
+            <input
+              v-model="cutoffDate"
+              class="display-cutoff-input"
+              placeholder="YYYY-MM-DD（空=至今）"
+              @change="loadKline"
+              @keyup.enter="loadKline"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div ref="settingsMenuRef" class="display-menu">
+        <button
+          class="menu-item"
+          :class="{ active: showSettingsMenu }"
+          @click.stop="toggleSettingsMenu"
+        >
+          设置 ▾
+        </button>
+        <div v-if="showSettingsMenu" class="settings-dropdown" @click.stop>
+          <div class="settings-row">
+            <label class="settings-label">通达信目录</label>
+            <input
+              v-model="tdxDirInput"
+              class="settings-input"
+              placeholder="例如 D:\new_tdx"
+              @keyup.enter="saveTdxDir"
+            />
+            <button class="settings-save" @click="saveTdxDir">保存</button>
+          </div>
+          <div v-if="settingsMsg" class="settings-msg">{{ settingsMsg }}</div>
         </div>
       </div>
     </nav>
@@ -378,6 +494,92 @@ html, body, #app {
   margin: 0;
   cursor: pointer;
   accent-color: #2563eb;
+}
+.display-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: #334155;
+}
+.display-cutoff {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 6px 32px;
+}
+.display-cutoff-label {
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+.display-cutoff-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 3px;
+}
+.display-cutoff-input:focus {
+  outline: none;
+  border-color: #2563eb;
+}
+
+/* 设置下拉 */
+.settings-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 2px;
+  min-width: 320px;
+  padding: 10px 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 100;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-label {
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+.settings-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-family: 'Consolas', monospace;
+  font-size: 12px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border: 1px solid #475569;
+  border-radius: 3px;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: #2563eb;
+}
+.settings-save {
+  padding: 4px 12px;
+  font-size: 12px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.settings-save:hover { background: #1d4ed8; }
+.settings-msg {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #10b981;
 }
 
 /* 主体 */
