@@ -482,24 +482,602 @@ func buildBi(fractals []Fractal, klines []KlineBar) []Bi {
 	return bis
 }
 
+// ============================================================
+//  线段 (Segment)
+// ============================================================
+//
+// 算法概览（向上线段为例）：
+//
+//  1. 笔序列 = bis 转 SeqElem 列表，每根笔 → 1 个元素，带 Direction (up/down)
+//  2. 主扫描从 segStart+1 起，遍历笔序列：
+//     - 反向笔（向下笔）进 第一CS，用"前包后"包含合并
+//     - 同向笔（向上笔）当前留作占位（Q5 待定）
+//     - 第一CS 出 顶分型 [a, b, c] 后：
+//       · 判 第一种 / 第二种情况（看 a-b 是否有缺口）
+//       · 第一种情况：判 subcase 1a / 1b（看破坏笔后第 3 笔是否在破坏笔范围内）
+//         - 1a：双 CS 验证 + 破点兜底
+//         - 1b：直接终止
+//       · 第二种情况：第二CS 单层验证
+//
+//  3. 终止后形成 Segment：可能附带 另一转折点（subcase 1a 的 CS-B 分型 / 不适用其他场景）
+
+// SeqElem 笔序列 / 特征序列元素（结构共用）
+type SeqElem struct {
+	Direction     string  // "up" / "down"
+	High          float64 // 上下端价格中较高者
+	Low           float64 // 较低者
+	FromPrice     float64 // 起点价
+	ToPrice       float64 // 终点价
+	FromTimestamp int64
+	ToTimestamp   int64
+	BiStartIdx    int // 在 bis 切片中起始笔下标
+	BiEndIdx      int // 末笔下标（合并后可能 > BiStartIdx）
+}
+
+// biToSeqElem 笔 → SeqElem
+func biToSeqElem(b Bi, idx int) SeqElem {
+	dir := "up"
+	if b.From.Type == "top" {
+		dir = "down"
+	}
+	high, low := b.From.Price, b.To.Price
+	if low > high {
+		high, low = low, high
+	}
+	return SeqElem{
+		Direction:     dir,
+		High:          high,
+		Low:           low,
+		FromPrice:     b.From.Price,
+		ToPrice:       b.To.Price,
+		FromTimestamp: b.From.Timestamp,
+		ToTimestamp:   b.To.Timestamp,
+		BiStartIdx:    idx,
+		BiEndIdx:      idx,
+	}
+}
+
+// buildBiSeq 把笔列表转笔序列
+func buildBiSeq(bis []Bi) []SeqElem {
+	out := make([]SeqElem, len(bis))
+	for i, b := range bis {
+		out[i] = biToSeqElem(b, i)
+	}
+	return out
+}
+
+// seqContained 判断两元素是否互为包含
+//
+//	返回 (frontContainsBack, backContainsFront)
+func seqContained(a, b SeqElem) (bool, bool) {
+	fcb := a.High >= b.High && a.Low <= b.Low
+	bcf := b.High >= a.High && b.Low <= a.Low
+	return fcb, bcf
+}
+
+// seqMergeReverse 反向 CS 元素合并（与线段方向相反的 CS）
+//
+//	向上线段 CS（下行笔）取高高；向下线段 CS（上行笔）取低低
+//	起点/终点价沿合并后的 high/low 设定（保持方向）
+func seqMergeReverse(a, b SeqElem, segDirection string) SeqElem {
+	out := SeqElem{
+		Direction:  a.Direction,
+		BiStartIdx: a.BiStartIdx,
+		BiEndIdx:   b.BiEndIdx,
+	}
+	if segDirection == "up" {
+		// CS 由下行笔组成，向下方向 → 高高（取较高）
+		out.High = maxF(a.High, b.High)
+		out.Low = maxF(a.Low, b.Low)
+	} else {
+		out.High = minF(a.High, b.High)
+		out.Low = minF(a.Low, b.Low)
+	}
+	// 反向笔（CS 元素）：起点 = high, 终点 = low（向下笔）
+	// 向下线段则相反
+	if out.Direction == "down" {
+		out.FromPrice = out.High
+		out.ToPrice = out.Low
+	} else {
+		out.FromPrice = out.Low
+		out.ToPrice = out.High
+	}
+	out.FromTimestamp = a.FromTimestamp
+	out.ToTimestamp = b.ToTimestamp
+	return out
+}
+
+// seqMergeForward 同向 CS 元素合并（与线段方向相同）
+//
+//	向上线段 CS-B（上行笔）取低低；向下线段 CS-B（下行笔）取高高
+//	（与 reverse 方向相反的合并规则）
+func seqMergeForward(a, b SeqElem, segDirection string) SeqElem {
+	out := SeqElem{
+		Direction:  a.Direction,
+		BiStartIdx: a.BiStartIdx,
+		BiEndIdx:   b.BiEndIdx,
+	}
+	if segDirection == "up" {
+		out.High = minF(a.High, b.High)
+		out.Low = minF(a.Low, b.Low)
+	} else {
+		out.High = maxF(a.High, b.High)
+		out.Low = maxF(a.Low, b.Low)
+	}
+	if out.Direction == "up" {
+		out.FromPrice = out.Low
+		out.ToPrice = out.High
+	} else {
+		out.FromPrice = out.High
+		out.ToPrice = out.Low
+	}
+	out.FromTimestamp = a.FromTimestamp
+	out.ToTimestamp = b.ToTimestamp
+	return out
+}
+
+func maxF(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+func minF(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// seqIsTop 顶分型：b.high > a.high && b.high > c.high && b.low > c.low
+func seqIsTop(a, b, c SeqElem) bool {
+	return b.High > a.High && b.High > c.High && b.Low > c.Low
+}
+
+// seqIsBottom 底分型：b.low < a.low && b.low < c.low && b.high < c.high
+func seqIsBottom(a, b, c SeqElem) bool {
+	return b.Low < a.Low && b.Low < c.Low && b.High < c.High
+}
+
+// seqHasGap 判 a-b 间是否有缺口
+//
+//	顶分型：a.high < b.low → 有缺口（b 区间完全在 a 上方）
+//	底分型：a.low  > b.high → 有缺口
+func seqHasGap(a, b SeqElem, fractalType string) bool {
+	if fractalType == "top" {
+		return a.High < b.Low
+	}
+	return a.Low > b.High
+}
+
+// Segment 线段
+//
+//	From/To = 主端点（起点和终点）
+//	AnotherTransition = subcase 1a 的 CS-B 衍生的另一转折点（可空）
+//	TerminationCase = 1（第一种）/ 2（第二种）/ 0（未终止）
+//	Subcase = 1（1a）/ 2（1b）/ 0（不适用）
+type Segment struct {
+	From              Fractal  `json:"from"`
+	To                Fractal  `json:"to"`
+	Direction         string   `json:"direction"`
+	AnotherTransition *Fractal `json:"anotherTransition,omitempty"`
+	TerminationCase   int      `json:"terminationCase"`
+	Subcase           int      `json:"subcase"`
+}
+
+// segmentEndResult 内部封装 findSegmentEnd 的返回
+type segmentEndResult struct {
+	confirmed         bool
+	endBiIdx          int      // 段终止笔下标（在 biSeq 中）
+	transition        Fractal  // 主转折点
+	anotherTransition *Fractal // 另一转折点（可空）
+	termCase          int
+	subcase           int
+}
+
+// buildSegments 从笔列表构建线段列表
+func buildSegments(bis []Bi) []Segment {
+	if len(bis) < 3 {
+		return nil
+	}
+	biSeq := buildBiSeq(bis)
+	var segments []Segment
+	segStart := 0
+
+	for segStart < len(biSeq)-2 {
+		direction := biSeq[segStart].Direction
+		result := findSegmentEnd(biSeq, segStart, direction)
+		if !result.confirmed {
+			break
+		}
+		if result.endBiIdx <= segStart {
+			break // 防御
+		}
+		seg := Segment{
+			From: Fractal{
+				Type:      directionFromType(direction, true),
+				Timestamp: biSeq[segStart].FromTimestamp,
+				Price:     biSeq[segStart].FromPrice,
+			},
+			To:                result.transition,
+			Direction:         direction,
+			AnotherTransition: result.anotherTransition,
+			TerminationCase:   result.termCase,
+			Subcase:           result.subcase,
+		}
+		segments = append(segments, seg)
+		segStart = result.endBiIdx + 1
+	}
+	return segments
+}
+
+// directionFromType 从段方向得出起点分型类型
+//
+//	向上段起点 = bottom（底）；向下段起点 = top（顶）
+func directionFromType(direction string, isStart bool) string {
+	if direction == "up" {
+		if isStart {
+			return "bottom"
+		}
+		return "top"
+	}
+	if isStart {
+		return "top"
+	}
+	return "bottom"
+}
+
+// findSegmentEnd 主扫描：找段终止点
+//
+//	走 biSeq[segStart+1:]，建第一CS（前包后），找段方向相反的分型
+//	找到分型后根据 第一种 / 第二种情况分支处理
+func findSegmentEnd(biSeq []SeqElem, segStart int, direction string) segmentEndResult {
+	var csA []SeqElem // 第一CS，反向笔，前包后
+
+	for j := segStart + 1; j < len(biSeq); j++ {
+		elem := biSeq[j]
+
+		if elem.Direction == direction {
+			// 同向笔：Q5 占位，暂不动作
+			continue
+		}
+
+		// 反向笔：加入 第一CS 并应用前包后包含
+		csA = addToCSFrontContains(csA, elem, direction)
+
+		if len(csA) < 3 {
+			continue
+		}
+		a, b, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
+
+		fractalType := ""
+		if direction == "up" && seqIsTop(a, b, c) {
+			fractalType = "top"
+		} else if direction == "down" && seqIsBottom(a, b, c) {
+			fractalType = "bottom"
+		}
+		if fractalType == "" {
+			continue
+		}
+
+		// 判 第一种 / 第二种情况
+		isCase2 := seqHasGap(a, b, fractalType)
+
+		if !isCase2 {
+			// 第一种情况
+			breakingIdx := b.BiStartIdx
+			result := handleCase1(biSeq, breakingIdx, b, direction)
+			if result.confirmed {
+				return result
+			}
+			// 段延续，继续主扫描
+			continue
+		}
+
+		// 第二种情况
+		result := handleCase2(biSeq, b, direction)
+		if result.confirmed {
+			return result
+		}
+		// 段延续，继续主扫描
+		continue
+	}
+
+	return segmentEndResult{confirmed: false}
+}
+
+// addToCSFrontContains 把 elem 加入 cs，应用"前包后"包含合并
+//
+//	若上一元素 a 完全包含新元素 b（a.high >= b.high && a.low <= b.low），合并
+//	否则追加
+func addToCSFrontContains(cs []SeqElem, elem SeqElem, segDirection string) []SeqElem {
+	if len(cs) == 0 {
+		return append(cs, elem)
+	}
+	last := cs[len(cs)-1]
+	fcb, _ := seqContained(last, elem)
+	if fcb {
+		cs[len(cs)-1] = seqMergeReverse(last, elem, segDirection)
+		return cs
+	}
+	return append(cs, elem)
+}
+
+// addToCSBoth 把 elem 加入 cs，应用"前后都可以"包含合并
+func addToCSBoth(cs []SeqElem, elem SeqElem, segDirection string, isReverse bool) []SeqElem {
+	if len(cs) == 0 {
+		return append(cs, elem)
+	}
+	last := cs[len(cs)-1]
+	fcb, bcf := seqContained(last, elem)
+	if fcb || bcf {
+		if isReverse {
+			cs[len(cs)-1] = seqMergeReverse(last, elem, segDirection)
+		} else {
+			cs[len(cs)-1] = seqMergeForward(last, elem, segDirection)
+		}
+		return cs
+	}
+	return append(cs, elem)
+}
+
+// fractalPointPrice 取分型 b 那一笔的极值点价格
+func fractalPointPrice(b SeqElem, fractalType string) float64 {
+	if fractalType == "top" {
+		return b.High
+	}
+	return b.Low
+}
+
+// makeFractalAt 用 b 那一笔的极值点构造一个 Fractal
+func makeFractalAt(b SeqElem, fractalType string) Fractal {
+	var ts int64
+	var price float64
+	if fractalType == "top" {
+		price = b.High
+		// 向下笔（CS 元素）的 high = From，时间戳取 FromTimestamp
+		if b.Direction == "down" {
+			ts = b.FromTimestamp
+		} else {
+			ts = b.ToTimestamp
+		}
+	} else {
+		price = b.Low
+		if b.Direction == "down" {
+			ts = b.ToTimestamp
+		} else {
+			ts = b.FromTimestamp
+		}
+	}
+	return Fractal{
+		Type:      fractalType,
+		Timestamp: ts,
+		Price:     price,
+	}
+}
+
+// handleCase1 第一种情况处理（顶/底分型，无缺口）
+func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string) segmentEndResult {
+	if breakingIdx+2 >= len(biSeq) {
+		// 数据不足判定 subcase，按 1b 处理
+		fractalType := "top"
+		if direction == "down" {
+			fractalType = "bottom"
+		}
+		return segmentEndResult{
+			confirmed:  true,
+			endBiIdx:   breakingIdx - 1,
+			transition: makeFractalAt(b, fractalType),
+			termCase:   1,
+			subcase:    0,
+		}
+	}
+
+	breakingBi := biSeq[breakingIdx]
+	thirdBi := biSeq[breakingIdx+2]
+	// 3rd 笔 ⊂ breaking笔 ?
+	fcb, _ := seqContained(breakingBi, thirdBi)
+	if !fcb {
+		// Subcase 1b
+		fractalType := "top"
+		if direction == "down" {
+			fractalType = "bottom"
+		}
+		return segmentEndResult{
+			confirmed:  true,
+			endBiIdx:   breakingIdx - 1,
+			transition: makeFractalAt(b, fractalType),
+			termCase:   1,
+			subcase:    2,
+		}
+	}
+	// Subcase 1a
+	return subcase1aDualCS(biSeq, breakingIdx, b, direction)
+}
+
+// subcase1aDualCS Subcase 1a 双 CS 验证
+//
+//	CS-A 起点 = 3rd 笔（biSeq[breakingIdx+2]）, 前包后, 找段方向相反分型
+//	CS-B 起点 = 3rd 笔之后的第一根同向笔, 不做包含, 找段方向相反对应分型
+//	破点：破 breaking.结束点（向上段：跌破 breaking.To.Price）→ 终止
+//	      破 breaking.开始点（向上段：突破 breaking.From.Price）→ 段延续
+func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direction string) segmentEndResult {
+	breakingBi := biSeq[breakingIdx]
+	breakingHigh := breakingBi.High
+	breakingLow := breakingBi.Low
+	breakingStart := breakingBi.FromPrice // 破坏笔起始点
+	// breakingEnd := breakingBi.ToPrice
+	_ = breakingStart
+
+	mainTransition := makeFractalAt(originalB, ternaryString(direction == "up", "top", "bottom"))
+
+	csA := []SeqElem{biSeq[breakingIdx+2]}
+	var csB []SeqElem
+
+	for j := breakingIdx + 3; j < len(biSeq); j++ {
+		elem := biSeq[j]
+
+		// 破点检查
+		if direction == "up" {
+			if elem.High > breakingHigh {
+				return segmentEndResult{confirmed: false} // 段延续
+			}
+			if elem.Low < breakingLow {
+				return segmentEndResult{
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
+				}
+			}
+		} else {
+			if elem.Low < breakingLow {
+				return segmentEndResult{confirmed: false}
+			}
+			if elem.High > breakingHigh {
+				return segmentEndResult{
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
+				}
+			}
+		}
+
+		if elem.Direction != direction {
+			// 反向笔 → CS-A 前包后
+			csA = addToCSFrontContains(csA, elem, direction)
+			if len(csA) >= 3 {
+				a, bm, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
+				if (direction == "up" && seqIsTop(a, bm, c)) ||
+					(direction == "down" && seqIsBottom(a, bm, c)) {
+					return segmentEndResult{
+						confirmed:  true,
+						endBiIdx:   breakingIdx - 1,
+						transition: mainTransition,
+						termCase:   1,
+						subcase:    1,
+					}
+				}
+			}
+		} else {
+			// 同向笔 → CS-B 不做包含
+			csB = append(csB, elem)
+			if len(csB) >= 3 {
+				a, bm, c := csB[len(csB)-3], csB[len(csB)-2], csB[len(csB)-1]
+				// 找段方向相反的分型（向上段找底，向下段找顶）
+				opposite := ternaryString(direction == "up", "bottom", "top")
+				ok := false
+				if opposite == "bottom" {
+					ok = seqIsBottom(a, bm, c)
+				} else {
+					ok = seqIsTop(a, bm, c)
+				}
+				if ok {
+					anotherFx := makeFractalAt(bm, opposite)
+					return segmentEndResult{
+						confirmed:         true,
+						endBiIdx:          breakingIdx - 1,
+						transition:        mainTransition,
+						anotherTransition: &anotherFx,
+						termCase:          1,
+						subcase:           1,
+					}
+				}
+			}
+		}
+	}
+
+	return segmentEndResult{confirmed: false}
+}
+
+// handleCase2 第二种情况处理（顶/底分型，有缺口）
+//
+//	第二CS 起点 = b 之后第一根同向笔，前后都可以包含，找段方向相反分型
+//	（不区分该分型的 第一/第二种情况，出现即终止）
+//	单根笔 high 超过 b.high（向上段）/ low 跌破 b.low（向下段）→ 段延续
+func handleCase2(biSeq []SeqElem, b SeqElem, direction string) segmentEndResult {
+	fractalType := ternaryString(direction == "up", "top", "bottom")
+	mainTransition := makeFractalAt(b, fractalType)
+	opposite := ternaryString(direction == "up", "bottom", "top")
+
+	var cs2 []SeqElem
+
+	for j := b.BiEndIdx + 1; j < len(biSeq); j++ {
+		elem := biSeq[j]
+
+		// 段延续检查（单根笔破 b 的开始点）
+		if direction == "up" && elem.High > b.High {
+			return segmentEndResult{confirmed: false}
+		}
+		if direction == "down" && elem.Low < b.Low {
+			return segmentEndResult{confirmed: false}
+		}
+
+		// 仅同向笔进 第二CS
+		if elem.Direction != direction {
+			continue
+		}
+		cs2 = addToCSBoth(cs2, elem, direction, false)
+
+		if len(cs2) >= 3 {
+			a, bm, c := cs2[len(cs2)-3], cs2[len(cs2)-2], cs2[len(cs2)-1]
+			ok := false
+			if opposite == "bottom" {
+				ok = seqIsBottom(a, bm, c)
+			} else {
+				ok = seqIsTop(a, bm, c)
+			}
+			if ok {
+				// b 那一笔需要从原 bis 切片重建以拿到正确的 Fractal 时间
+				// 这里直接用 b 的 From/To 字段
+				return segmentEndResult{
+					confirmed:  true,
+					endBiIdx:   b.BiStartIdx - 1,
+					transition: mainTransition,
+					termCase:   2,
+					subcase:    0,
+				}
+			}
+		}
+	}
+
+	return segmentEndResult{confirmed: false}
+}
+
+// ternaryString 模拟三目运算符
+func ternaryString(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
+}
+
 // AnalyzeChan 把缠论分析输出聚合，供 GetKline 一次性返回
 type ChanAnalysis struct {
 	Fractals []Fractal `json:"fractals"`
 	Bis      []Bi      `json:"bis"`
+	Segments []Segment `json:"segments"`
 }
 
 func AnalyzeChan(klines []KlineBar) ChanAnalysis {
 	if len(klines) < 3 {
-		return ChanAnalysis{Fractals: []Fractal{}, Bis: []Bi{}}
+		return ChanAnalysis{Fractals: []Fractal{}, Bis: []Bi{}, Segments: []Segment{}}
 	}
 	processed := processContainment(klines)
 	fractals := findFractals(processed, klines)
 	bis := buildBi(fractals, klines)
+	segments := buildSegments(bis)
 	if fractals == nil {
 		fractals = []Fractal{}
 	}
 	if bis == nil {
 		bis = []Bi{}
+	}
+	if segments == nil {
+		segments = []Segment{}
 	}
 	// 回填 IsEndpoint：以 (Timestamp, Type) 为键，把所有笔端点对应的分型标记为
 	// 端点，便于前端展示哪些分型实际成笔
@@ -516,5 +1094,5 @@ func AnalyzeChan(klines []KlineBar) ChanAnalysis {
 			fractals[i].IsEndpoint = true
 		}
 	}
-	return ChanAnalysis{Fractals: fractals, Bis: bis}
+	return ChanAnalysis{Fractals: fractals, Bis: bis, Segments: segments}
 }

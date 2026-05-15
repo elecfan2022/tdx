@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
-import { init, dispose, registerOverlay, type Chart, type KLineData } from 'klinecharts'
+import { init, dispose, registerOverlay, LineType, type Chart, type KLineData } from 'klinecharts'
 
 // 自定义镜像版 simpleAnnotation —— 画在数据点下方，箭头朝上指向 K 线最低点
 // 给"底分型"用
@@ -64,14 +64,24 @@ interface Bi {
   from: Fractal
   to: Fractal
 }
+interface Segment {
+  from: Fractal
+  to: Fractal
+  direction: 'up' | 'down'
+  anotherTransition?: Fractal | null
+  terminationCase: number
+  subcase: number
+}
 
 const props = defineProps<{
   data: KLineData[]
   period: string
   fractals: Fractal[]
   bis: Bi[]
+  segments: Segment[]
   showFractals: boolean
   showBis: boolean
+  showSegments: boolean
 }>()
 
 const containerRef = ref<HTMLDivElement | null>(null)
@@ -85,6 +95,8 @@ function timezone(period: string) {
 const TOP_COLOR = '#EF4444'    // 顶分型 红
 const BOTTOM_COLOR = '#10B981' // 底分型 绿
 const BI_COLOR = '#FBBF24'     // 笔 黄
+const SEG_COLOR = '#38BDF8'    // 线段主端点 青蓝
+const SEG_ALT_COLOR = '#A855F7' // 线段 另一转折点 紫
 
 function drawChan() {
   if (!chart) return
@@ -123,6 +135,64 @@ function drawChan() {
           point: { activeColor: BI_COLOR, color: BI_COLOR, borderColor: BI_COLOR },
         },
       })
+    }
+  }
+
+  if (props.showSegments) {
+    for (let i = 0; i < props.segments.length; i++) {
+      const seg = props.segments[i]
+      // startCase = 上一段的 terminationCase；首段无上一段，默认 1（实线）
+      // endCase   = 本段的 terminationCase；0（未终止）默认 1
+      const startCase = i > 0 ? props.segments[i - 1].terminationCase || 1 : 1
+      const endCase = seg.terminationCase || 1
+      const startStyle = startCase === 2 ? LineType.Dashed : LineType.Solid
+      const endStyle = endCase === 2 ? LineType.Dashed : LineType.Solid
+
+      const midTs = Math.round((seg.from.timestamp + seg.to.timestamp) / 2)
+      const midPrice = (seg.from.price + seg.to.price) / 2
+
+      // 前半段：from → mid，按 startCase 决定虚实
+      chart.createOverlay({
+        name: 'segment',
+        points: [
+          { timestamp: seg.from.timestamp, value: seg.from.price },
+          { timestamp: midTs, value: midPrice },
+        ],
+        lock: true,
+        styles: {
+          line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
+          point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+        },
+      })
+      // 后半段：mid → to，按 endCase 决定虚实
+      chart.createOverlay({
+        name: 'segment',
+        points: [
+          { timestamp: midTs, value: midPrice },
+          { timestamp: seg.to.timestamp, value: seg.to.price },
+        ],
+        lock: true,
+        styles: {
+          line: { color: SEG_COLOR, size: 3, style: endStyle, dashedValue: [6, 4] },
+          point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+        },
+      })
+
+      // 另一转折点：从 To 到 anotherTransition，紫色 3px（暂不分虚实）
+      if (seg.anotherTransition) {
+        chart.createOverlay({
+          name: 'segment',
+          points: [
+            { timestamp: seg.to.timestamp, value: seg.to.price },
+            { timestamp: seg.anotherTransition.timestamp, value: seg.anotherTransition.price },
+          ],
+          lock: true,
+          styles: {
+            line: { color: SEG_ALT_COLOR, size: 3 },
+            point: { activeColor: SEG_ALT_COLOR, color: SEG_ALT_COLOR, borderColor: SEG_ALT_COLOR },
+          },
+        })
+      }
     }
   }
 }
@@ -297,7 +367,14 @@ watch(
 
 // 缠论数据或显示开关变化 → 重新画 overlay
 watch(
-  () => [props.fractals, props.bis, props.showFractals, props.showBis],
+  () => [
+    props.fractals,
+    props.bis,
+    props.segments,
+    props.showFractals,
+    props.showBis,
+    props.showSegments,
+  ],
   () => drawChan(),
   { deep: false },
 )

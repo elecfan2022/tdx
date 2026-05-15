@@ -33,6 +33,14 @@ interface Bi {
   from: Fractal
   to: Fractal
 }
+interface Segment {
+  from: Fractal
+  to: Fractal
+  direction: 'up' | 'down'
+  anotherTransition?: Fractal | null
+  terminationCase: number
+  subcase: number
+}
 
 const code = ref('000001')
 const codeInput = ref('000001')
@@ -41,15 +49,17 @@ const period = ref<Period>('day')
 const data = ref<KLineData[]>([])
 const fractals = ref<Fractal[]>([])
 const bis = ref<Bi[]>([])
+const segments = ref<Segment[]>([])
 
 // 右侧面板：自选股 / 分型笔列表 互斥；null 表示都不显示
 const rightPanel = ref<RightPanel>('watchlist')
 const watchlistRef = ref<InstanceType<typeof Watchlist> | null>(null)
 const chartRef = ref<InstanceType<typeof KChart> | null>(null)
 
-// 主图缠论显示开关（独立勾选，可同时关掉两个）
+// 主图缠论显示开关（独立勾选，可同时关掉）
 const showFractals = ref(true)
 const showBis = ref(true)
+const showSegments = ref(true)
 
 // 数据来源选择（至少勾一个；都勾即"本地+实时补齐"模式）
 const useRealtime = ref(true)
@@ -183,8 +193,11 @@ async function loadKline() {
     }))
     fractals.value = resp?.fractals ?? []
     bis.value = resp?.bis ?? []
+    segments.value = resp?.segments ?? []
     lastUpdate.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    statusMsg.value = `K 线 ${data.value.length} 根 · 分型 ${fractals.value.length} · 笔 ${bis.value.length}`
+    const segC1 = segments.value.filter(s => s.terminationCase === 1).length
+    const segC2 = segments.value.filter(s => s.terminationCase === 2).length
+    statusMsg.value = `K 线 ${data.value.length} 根 · 分型 ${fractals.value.length} · 笔 ${bis.value.length} · 线段 ${segments.value.length}(一类 ${segC1}/二类 ${segC2})`
   } catch (e: any) {
     if (token === klineToken) {
       statusMsg.value = '错误：' + String(e?.message ?? e)
@@ -289,6 +302,10 @@ onBeforeUnmount(() => {
             <input type="checkbox" v-model="showBis" />
             <span>笔</span>
           </label>
+          <label class="display-opt">
+            <input type="checkbox" v-model="showSegments" />
+            <span>线段</span>
+          </label>
           <div class="display-divider" />
           <label class="display-opt">
             <input
@@ -384,8 +401,10 @@ onBeforeUnmount(() => {
             :period="period"
             :fractals="fractals"
             :bis="bis"
+            :segments="segments"
             :show-fractals="showFractals"
             :show-bis="showBis"
+            :show-segments="showSegments"
           />
         </main>
       </section>

@@ -112,11 +112,12 @@ func periodToType(period string) (uint8, error) {
 	}
 }
 
-// KlineWithChan 给前端的完整数据包：原始 K 线 + 缠论分析（分型 + 笔）
+// KlineWithChan 给前端的完整数据包：原始 K 线 + 缠论分析（分型 + 笔 + 线段）
 type KlineWithChan struct {
 	Klines   []KlineBar `json:"klines"`
 	Fractals []Fractal  `json:"fractals"`
 	Bis      []Bi       `json:"bis"`
+	Segments []Segment  `json:"segments"`
 }
 
 // GetKline 拉取最近 count 根 K 线，附带缠论分型与笔
@@ -161,6 +162,7 @@ func (a *App) GetKline(code string, period string, count int, useRealtime, useLo
 		Klines:   klines,
 		Fractals: chan_.Fractals,
 		Bis:      chan_.Bis,
+		Segments: chan_.Segments,
 	}, nil
 }
 
