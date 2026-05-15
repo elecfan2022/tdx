@@ -731,10 +731,21 @@ func directionFromType(direction string, isStart bool) string {
 	return "bottom"
 }
 
-// findSegmentEnd 主扫描：找段终止点
+// findSegmentEnd 主扫描：找段终止点（新算法）
 //
-//	走 biSeq[segStart+1:]，建第一CS（前包后），找段方向相反的分型
-//	找到分型后根据 第一种 / 第二种情况分支处理
+//	主扫描始终用 前包后 合并 反向笔 进 csA。每加入一个反向笔后，若 csA 长度
+//	≥ 2，立即取 csA[-2]=a, csA[-1]=b 做"破坏笔识别检查"：
+//
+//	  • a.high >= b.low (无缺口) && b.high > a.high (b 结构上高于 a)
+//	      → 潜在 第一种情况 → 立即调 handleCase1
+//	  • a.high <  b.low (有缺口) && b.high > a.high
+//	      → 潜在 第二种情况 → 立即调 handleCase2
+//	  • b.high <= a.high (b 不高于 a)
+//	      → 第三种情况，不调用任何 handle，继续主扫描下一根反向笔
+//
+//	若 handleCase1/2 返回 not confirmed，段未终止，主扫描继续，等下一根
+//	反向笔进入 csA 后再做识别（滑动窗口）。
+//	向下段对称（无缺口 = a.low <= b.high；b 结构上低于 a = b.low < a.low）。
 func findSegmentEnd(biSeq []SeqElem, segStart int, direction string) segmentEndResult {
 	var csA []SeqElem // 第一CS，反向笔，前包后
 
@@ -749,42 +760,40 @@ func findSegmentEnd(biSeq []SeqElem, segStart int, direction string) segmentEndR
 		// 反向笔：加入 第一CS 并应用前包后包含
 		csA = addToCSFrontContains(csA, elem, direction)
 
-		if len(csA) < 3 {
+		if len(csA) < 2 {
 			continue
 		}
-		a, b, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
+		a := csA[len(csA)-2]
+		b := csA[len(csA)-1]
 
-		fractalType := ""
-		if direction == "up" && seqIsTop(a, b, c) {
-			fractalType = "top"
-		} else if direction == "down" && seqIsBottom(a, b, c) {
-			fractalType = "bottom"
+		var noGap, bHigher bool
+		if direction == "up" {
+			noGap = a.High >= b.Low
+			bHigher = b.High > a.High
+		} else {
+			noGap = a.Low <= b.High
+			bHigher = b.Low < a.Low
 		}
-		if fractalType == "" {
+
+		if !bHigher {
+			// 第三种情况：b 不符合结构条件，继续扫描
 			continue
 		}
 
-		// 判 第一种 / 第二种情况
-		isCase2 := seqHasGap(a, b, fractalType)
-
-		if !isCase2 {
-			// 第一种情况
-			breakingIdx := b.BiStartIdx
-			result := handleCase1(biSeq, breakingIdx, b, direction)
+		if noGap {
+			// 潜在 第一种情况
+			result := handleCase1(biSeq, b.BiStartIdx, b, direction, a)
 			if result.confirmed {
 				return result
 			}
-			// 段延续，继续主扫描
-			continue
+		} else {
+			// 潜在 第二种情况
+			result := handleCase2(biSeq, b, direction)
+			if result.confirmed {
+				return result
+			}
 		}
-
-		// 第二种情况
-		result := handleCase2(biSeq, b, direction)
-		if result.confirmed {
-			return result
-		}
-		// 段延续，继续主扫描
-		continue
+		// 不 confirmed → 段延续，继续主扫描
 	}
 
 	return segmentEndResult{confirmed: false}
@@ -861,20 +870,21 @@ func makeFractalAt(b SeqElem, fractalType string) Fractal {
 }
 
 // handleCase1 第一种情况处理（顶/底分型，无缺口）
-func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string) segmentEndResult {
+//
+//	新算法：在 csA = [..., a, b] 识别 潜在第一种 后被立即调用（顶分型 还未确定形成）。
+//	  subcase 1a (3rd笔 ⊂ breaking笔) → dualCSConfirm 双 CS 验证
+//	  subcase 1b (3rd笔 ⊄ breaking笔) → **验证 顶分型 [a, b, c] 是否真的成立**
+//	    成立 → 终止；不成立 → not confirmed（主扫描继续）
+//	a 参数：csA 中 b 前面的元素，用于 顶分型 验证
+func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string, a SeqElem) segmentEndResult {
+	fractalType := "top"
+	if direction == "down" {
+		fractalType = "bottom"
+	}
+
 	if breakingIdx+2 >= len(biSeq) {
-		// 数据不足判定 subcase，按 1b 处理
-		fractalType := "top"
-		if direction == "down" {
-			fractalType = "bottom"
-		}
-		return segmentEndResult{
-			confirmed:  true,
-			endBiIdx:   breakingIdx - 1,
-			transition: makeFractalAt(b, fractalType),
-			termCase:   1,
-			subcase:    0,
-		}
+		// 数据不足，无法判定 subcase 也无法验证 顶分型 → not confirmed
+		return segmentEndResult{confirmed: false}
 	}
 
 	breakingBi := biSeq[breakingIdx]
@@ -882,10 +892,21 @@ func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string) 
 	// 3rd 笔 ⊂ breaking笔 ?
 	fcb, _ := seqContained(breakingBi, thirdBi)
 	if !fcb {
-		// Subcase 1b
-		fractalType := "top"
-		if direction == "down" {
-			fractalType = "bottom"
+		// Subcase 1b：验证 顶分型 [a, b, c] 是否成立
+		// c 就是 thirdBi（视作单根 SeqElem 比较）
+		c := thirdBi
+		var fractalOK bool
+		if direction == "up" {
+			// 顶分型：b.high > a.high && b.high > c.high && b.low > c.low
+			// b.high > a.high 已在 findSegmentEnd 识别阶段保证
+			fractalOK = b.High > c.High && b.Low > c.Low
+		} else {
+			// 底分型：b.low < a.low && b.low < c.low && b.high < c.high
+			fractalOK = b.Low < c.Low && b.High < c.High
+		}
+		if !fractalOK {
+			// 顶/底分型 实际不成立 → not confirmed
+			return segmentEndResult{confirmed: false}
 		}
 		return segmentEndResult{
 			confirmed:  true,
@@ -895,7 +916,7 @@ func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string) 
 			subcase:    2,
 		}
 	}
-	// Subcase 1a
+	// Subcase 1a：双 CS 验证
 	return subcase1aDualCS(biSeq, breakingIdx, b, direction)
 }
 
@@ -921,35 +942,7 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 	for j := breakingIdx + 3; j < len(biSeq); j++ {
 		elem := biSeq[j]
 
-		// 破点检查
-		if direction == "up" {
-			if elem.High > breakingHigh {
-				return segmentEndResult{confirmed: false} // 段延续
-			}
-			if elem.Low < breakingLow {
-				return segmentEndResult{
-					confirmed:  true,
-					endBiIdx:   breakingIdx - 1,
-					transition: mainTransition,
-					termCase:   1,
-					subcase:    1,
-				}
-			}
-		} else {
-			if elem.Low < breakingLow {
-				return segmentEndResult{confirmed: false}
-			}
-			if elem.High > breakingHigh {
-				return segmentEndResult{
-					confirmed:  true,
-					endBiIdx:   breakingIdx - 1,
-					transition: mainTransition,
-					termCase:   1,
-					subcase:    1,
-				}
-			}
-		}
-
+		// 第一步：CS 更新 + 分型检查（分型优先于破点）
 		if elem.Direction != direction {
 			// 反向笔 → CS-A 前包后
 			csA = addToCSFrontContains(csA, elem, direction)
@@ -989,6 +982,36 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 						termCase:          1,
 						subcase:           1,
 					}
+				}
+			}
+		}
+
+		// 第二步：破点检查（仅在没出现分型时作为兜底）
+		if direction == "up" {
+			if elem.High > breakingHigh {
+				return segmentEndResult{confirmed: false} // 破开始点 → 段延续
+			}
+			if elem.Low < breakingLow {
+				// 破结束点 → 终止
+				return segmentEndResult{
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
+				}
+			}
+		} else {
+			if elem.Low < breakingLow {
+				return segmentEndResult{confirmed: false}
+			}
+			if elem.High > breakingHigh {
+				return segmentEndResult{
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
 				}
 			}
 		}
@@ -1073,28 +1096,168 @@ type CSAItem struct {
 	BiEndIdx   int     `json:"biEndIdx"`
 }
 
+// DualCSDiag subcase 1a 双 CS 诊断
+//
+//	Trigger 枚举：
+//	  "csA_fractal"  - CS-A 出现段方向相反分型，段终止
+//	  "csB_fractal"  - CS-B 出现 opposite 分型，段终止 + 另一转折点
+//	  "break_end"    - 破破坏笔结束点，段终止
+//	  "break_start"  - 破破坏笔开始点，段延续 (return not confirmed)
+//	  "exhausted"    - 数据扫完无任何信号
+type DualCSDiag struct {
+	CSA               []CSAItem `json:"csA"`
+	CSB               []CSAItem `json:"csB"`
+	Trigger           string    `json:"trigger"`
+	TriggerBiIdx      int       `json:"triggerBiIdx"`
+	TriggerFractalIdx [3]int    `json:"triggerFractalIdx,omitempty"`
+	AnotherTransition *Fractal  `json:"anotherTransition,omitempty"`
+	BreakingHigh      float64   `json:"breakingHigh"`
+	BreakingLow       float64   `json:"breakingLow"`
+}
+
 // SegmentDiag 段诊断结果
 type SegmentDiag struct {
-	Found             bool       `json:"found"`
-	Note              string     `json:"note"`
-	SegFrom           *Fractal   `json:"segFrom,omitempty"`
-	SegTo             *Fractal   `json:"segTo,omitempty"`
-	Direction         string     `json:"direction,omitempty"`
-	TerminationCase   int        `json:"terminationCase"`
-	Subcase           int        `json:"subcase"`
-	CSA               []CSAItem  `json:"csA,omitempty"`        // 终止时 CS-A 的所有元素（前包后合并后）
-	FractalIdx        [3]int     `json:"fractalIdx,omitempty"` // 顶/底分型 a, b, c 在 CSA 中的下标
-	HasGap            bool       `json:"hasGap"`
-	GapDescription    string     `json:"gapDescription,omitempty"`
-	AnotherTransition *Fractal   `json:"anotherTransition,omitempty"`
+	Found             bool        `json:"found"`
+	Note              string      `json:"note"`
+	SegFrom           *Fractal    `json:"segFrom,omitempty"`
+	SegTo             *Fractal    `json:"segTo,omitempty"`
+	Direction         string      `json:"direction,omitempty"`
+	TerminationCase   int         `json:"terminationCase"`
+	Subcase           int         `json:"subcase"`
+	CSA               []CSAItem   `json:"csA,omitempty"`        // 终止时 CS-A 的所有元素（前包后合并后）
+	FractalIdx        [3]int      `json:"fractalIdx,omitempty"` // 顶/底分型 a, b, c 在 CSA 中的下标
+	HasGap            bool        `json:"hasGap"`
+	GapDescription    string      `json:"gapDescription,omitempty"`
+	AnotherTransition *Fractal    `json:"anotherTransition,omitempty"`
+	DualCS            *DualCSDiag `json:"dualCS,omitempty"` // 仅 subcase 1a 时填充
+}
+
+// csAToItems 把 csA SeqElem 列表转 CSAItem 列表（诊断输出用）
+func csAToItems(cs []SeqElem) []CSAItem {
+	out := make([]CSAItem, len(cs))
+	for i, e := range cs {
+		out[i] = CSAItem{
+			High:       e.High,
+			Low:        e.Low,
+			FromTs:     e.FromTimestamp,
+			ToTs:       e.ToTimestamp,
+			BiStartIdx: e.BiStartIdx,
+			BiEndIdx:   e.BiEndIdx,
+		}
+	}
+	return out
+}
+
+// traceSubcase1aDualCS 复刻 subcase1aDualCS 的逻辑但记录完整 trace
+//
+//	镜像生产代码的判定顺序（CS 更新+分型检查 在前，破点检查 在后）。
+//	无论哪种 Trigger 都会填充 CSA / CSB 的最终状态。
+func traceSubcase1aDualCS(biSeq []SeqElem, breakingIdx int, direction string) *DualCSDiag {
+	if breakingIdx+2 >= len(biSeq) {
+		return nil
+	}
+	breakingBi := biSeq[breakingIdx]
+	diag := &DualCSDiag{
+		Trigger:           "exhausted",
+		TriggerBiIdx:      -1,
+		TriggerFractalIdx: [3]int{-1, -1, -1},
+		BreakingHigh:      breakingBi.High,
+		BreakingLow:       breakingBi.Low,
+	}
+
+	csA := []SeqElem{biSeq[breakingIdx+2]}
+	var csB []SeqElem
+
+	for j := breakingIdx + 3; j < len(biSeq); j++ {
+		elem := biSeq[j]
+
+		// 第一步：CS 更新 + 分型检查
+		if elem.Direction != direction {
+			csA = addToCSFrontContains(csA, elem, direction)
+			if len(csA) >= 3 {
+				a, bm, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
+				if (direction == "up" && seqIsTop(a, bm, c)) ||
+					(direction == "down" && seqIsBottom(a, bm, c)) {
+					diag.Trigger = "csA_fractal"
+					diag.TriggerBiIdx = j
+					diag.TriggerFractalIdx = [3]int{len(csA) - 3, len(csA) - 2, len(csA) - 1}
+					diag.CSA = csAToItems(csA)
+					diag.CSB = csAToItems(csB)
+					return diag
+				}
+			}
+		} else {
+			csB = append(csB, elem)
+			if len(csB) >= 3 {
+				a, bm, c := csB[len(csB)-3], csB[len(csB)-2], csB[len(csB)-1]
+				opposite := ternaryString(direction == "up", "bottom", "top")
+				ok := false
+				if opposite == "bottom" {
+					ok = seqIsBottom(a, bm, c)
+				} else {
+					ok = seqIsTop(a, bm, c)
+				}
+				if ok {
+					anotherFx := makeFractalAt(bm, opposite)
+					diag.Trigger = "csB_fractal"
+					diag.TriggerBiIdx = j
+					diag.TriggerFractalIdx = [3]int{len(csB) - 3, len(csB) - 2, len(csB) - 1}
+					diag.AnotherTransition = &anotherFx
+					diag.CSA = csAToItems(csA)
+					diag.CSB = csAToItems(csB)
+					return diag
+				}
+			}
+		}
+
+		// 第二步：破点检查
+		if direction == "up" {
+			if elem.High > diag.BreakingHigh {
+				diag.Trigger = "break_start"
+				diag.TriggerBiIdx = j
+				diag.CSA = csAToItems(csA)
+				diag.CSB = csAToItems(csB)
+				return diag
+			}
+			if elem.Low < diag.BreakingLow {
+				diag.Trigger = "break_end"
+				diag.TriggerBiIdx = j
+				diag.CSA = csAToItems(csA)
+				diag.CSB = csAToItems(csB)
+				return diag
+			}
+		} else {
+			if elem.Low < diag.BreakingLow {
+				diag.Trigger = "break_start"
+				diag.TriggerBiIdx = j
+				diag.CSA = csAToItems(csA)
+				diag.CSB = csAToItems(csB)
+				return diag
+			}
+			if elem.High > diag.BreakingHigh {
+				diag.Trigger = "break_end"
+				diag.TriggerBiIdx = j
+				diag.CSA = csAToItems(csA)
+				diag.CSB = csAToItems(csB)
+				return diag
+			}
+		}
+	}
+
+	diag.CSA = csAToItems(csA)
+	diag.CSB = csAToItems(csB)
+	return diag
 }
 
 // diagnoseSegmentTrace 给定一条 Segment 的位置，重跑 第一CS 扫描，捕获终止时 CS-A 状态
 //
-//	返回 (csA, [a, b, c]在 csA 中的下标, found)
+//	新算法：识别在 csA size==2 时做 (csA[-2]=a, csA[-1]=b)。终止时 b.BiStartIdx
+//	对应原 bis 中的"破坏笔"索引（= endBiIdx + 1）。
+//	返回 (csA, [a, b, c=-1]在 csA 中的下标, found)
+//	c 在新算法主扫描中并不存在（没有 3 元素顶分型）；保留位置占位为 -1。
 func diagnoseSegmentTrace(biSeq []SeqElem, segStart, endBiIdx int, direction string) ([]SeqElem, [3]int, bool) {
 	var csA []SeqElem
-	targetBiIdx := endBiIdx + 1 // 破坏笔下标 = 顶分型中间元素 b 的 biStartIdx
+	targetBiIdx := endBiIdx + 1 // 破坏笔下标 = b.BiStartIdx
 
 	for j := segStart + 1; j < len(biSeq); j++ {
 		elem := biSeq[j]
@@ -1102,17 +1265,8 @@ func diagnoseSegmentTrace(biSeq []SeqElem, segStart, endBiIdx int, direction str
 			continue
 		}
 		csA = addToCSFrontContains(csA, elem, direction)
-		if len(csA) >= 3 {
-			a, b, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
-			isFractal := false
-			if direction == "up" && seqIsTop(a, b, c) {
-				isFractal = true
-			} else if direction == "down" && seqIsBottom(a, b, c) {
-				isFractal = true
-			}
-			if isFractal && b.BiStartIdx == targetBiIdx {
-				return csA, [3]int{len(csA) - 3, len(csA) - 2, len(csA) - 1}, true
-			}
+		if len(csA) >= 2 && csA[len(csA)-1].BiStartIdx == targetBiIdx {
+			return csA, [3]int{len(csA) - 2, len(csA) - 1, -1}, true
 		}
 	}
 	return csA, [3]int{-1, -1, -1}, false
@@ -1142,9 +1296,18 @@ func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
 	segments := buildSegments(bis)
 	idx := findSegmentByStartTs(segments, startDatePrefix, loc)
 	if idx < 0 {
+		// 列出所有线段起点日期供参考
+		dates := make([]string, 0, len(segments))
+		for _, s := range segments {
+			dates = append(dates, time.UnixMilli(s.From.Timestamp).In(loc).Format("2006-01-02"))
+		}
+		datesStr := "无"
+		if len(dates) > 0 {
+			datesStr = strings.Join(dates, ", ")
+		}
 		return SegmentDiag{
 			Found: false,
-			Note:  fmt.Sprintf("未找到起点匹配 %q 的线段（共 %d 段）", startDatePrefix, len(segments)),
+			Note:  fmt.Sprintf("未找到起点匹配 %q 的线段。共 %d 段，起点日期：%s", startDatePrefix, len(segments), datesStr),
 		}
 	}
 
@@ -1219,6 +1382,12 @@ func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
 		}
 	} else {
 		diag.Note = "未能复现终止时的 第一CS 顶分型；CSA 输出的是扫描结束时的状态"
+	}
+
+	// 若为 subcase 1a，补充双 CS 内部 trace
+	if seg.TerminationCase == 1 && seg.Subcase == 1 {
+		breakingIdx := endBiIdx + 1 // 破坏笔下标
+		diag.DualCS = traceSubcase1aDualCS(biSeq, breakingIdx, seg.Direction)
 	}
 
 	return diag

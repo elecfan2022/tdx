@@ -436,8 +436,9 @@ func (a *App) DiagnoseBi(code, period, fromDate, toDate string) (*BiDiagnosis, e
 
 // DiagnoseSegment 段诊断：按段起点日期前缀（"YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM"）
 // 找到对应线段，输出终止时 第一CS 的元素链路、顶/底分型 a/b/c 位置、缺口判定细节。
-func (a *App) DiagnoseSegment(code, period, startDatePrefix string) (*SegmentDiag, error) {
-	resp, err := a.GetKline(code, period, 5000, true, false, "")
+// useRealtime/useLocal/cutoffDate 与主图 GetKline 对齐，保证诊断的数据范围一致。
+func (a *App) DiagnoseSegment(code, period string, useRealtime, useLocal bool, cutoffDate, startDatePrefix string) (*SegmentDiag, error) {
+	resp, err := a.GetKline(code, period, 0, useRealtime, useLocal, cutoffDate)
 	if err != nil {
 		return nil, err
 	}

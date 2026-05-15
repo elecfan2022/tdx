@@ -138,6 +138,50 @@ export namespace main {
 	        this.biEndIdx = source["biEndIdx"];
 	    }
 	}
+	export class DualCSDiag {
+	    csA: CSAItem[];
+	    csB: CSAItem[];
+	    trigger: string;
+	    triggerBiIdx: number;
+	    triggerFractalIdx?: number[];
+	    anotherTransition?: Fractal;
+	    breakingHigh: number;
+	    breakingLow: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DualCSDiag(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.csA = this.convertValues(source["csA"], CSAItem);
+	        this.csB = this.convertValues(source["csB"], CSAItem);
+	        this.trigger = source["trigger"];
+	        this.triggerBiIdx = source["triggerBiIdx"];
+	        this.triggerFractalIdx = source["triggerFractalIdx"];
+	        this.anotherTransition = this.convertValues(source["anotherTransition"], Fractal);
+	        this.breakingHigh = source["breakingHigh"];
+	        this.breakingLow = source["breakingLow"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	
 	export class KlineBar {
 	    timestamp: number;
@@ -253,6 +297,7 @@ export namespace main {
 	    hasGap: boolean;
 	    gapDescription?: string;
 	    anotherTransition?: Fractal;
+	    dualCS?: DualCSDiag;
 	
 	    static createFrom(source: any = {}) {
 	        return new SegmentDiag(source);
@@ -272,6 +317,7 @@ export namespace main {
 	        this.hasGap = source["hasGap"];
 	        this.gapDescription = source["gapDescription"];
 	        this.anotherTransition = this.convertValues(source["anotherTransition"], Fractal);
+	        this.dualCS = this.convertValues(source["dualCS"], DualCSDiag);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

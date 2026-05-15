@@ -18,6 +18,9 @@ const props = defineProps<{
   bis: Bi[]
   period: string
   code: string
+  useRealtime: boolean
+  useLocal: boolean
+  cutoffDate: string
 }>()
 
 const emit = defineEmits<{
@@ -70,6 +73,9 @@ async function runDiag() {
       segDiagResult.value = await window.go.main.App.DiagnoseSegment(
         props.code,
         props.period,
+        props.useRealtime,
+        props.useLocal,
+        props.useLocal ? props.cutoffDate : '',
         segDiagStart.value,
       )
     } catch (e: any) {
@@ -248,6 +254,76 @@ const bisDesc = computed(() => [...props.bis].reverse())
             </div>
           </div>
           <div v-if="segDiagResult.note" class="diag-note">{{ segDiagResult.note }}</div>
+
+          <!-- subcase 1a 双 CS trace -->
+          <template v-if="segDiagResult.dualCS">
+            <div class="diag-section">
+              <div class="diag-label">双 CS 验证触发</div>
+              <div class="diag-rule">
+                <template v-if="segDiagResult.dualCS.trigger === 'csA_fractal'">
+                  ★ CS-A 出现段方向相反分型 → 段终止
+                </template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'csB_fractal'">
+                  ★ CS-B 出现 opposite 分型 → 段终止 + 另一转折点
+                </template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'break_end'">
+                  ★ 破破坏笔结束点 → 段终止 (兜底)
+                </template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'break_start'">
+                  ★ 破破坏笔开始点 → 段延续 (不应出现在已确认的段中)
+                </template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'exhausted'">
+                  ★ 数据扫完无任何信号
+                </template>
+                <template v-else>{{ segDiagResult.dualCS.trigger }}</template>
+              </div>
+              <div class="diag-sub">破坏笔区间：[{{ segDiagResult.dualCS.breakingLow.toFixed(2) }}, {{ segDiagResult.dualCS.breakingHigh.toFixed(2) }}]</div>
+              <div v-if="segDiagResult.dualCS.triggerBiIdx >= 0" class="diag-sub">触发笔下标 bi[{{ segDiagResult.dualCS.triggerBiIdx }}]</div>
+            </div>
+            <div class="diag-section" v-if="segDiagResult.dualCS.csA && segDiagResult.dualCS.csA.length > 0">
+              <div class="diag-label">CS-A 元素链 (反向笔，前包后)</div>
+              <div
+                v-for="(c, ci) in segDiagResult.dualCS.csA"
+                :key="'csa-'+ci"
+                class="diag-rule"
+                :class="{
+                  'cs-a': segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[0],
+                  'cs-b': segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[1],
+                  'cs-c': segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[2],
+                }"
+              >
+                <template v-if="segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[0]">[a]</template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[1]">[b]</template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'csA_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[2]">[c]</template>
+                <template v-else>#{{ ci }}</template>
+                high={{ c.high.toFixed(2) }} low={{ c.low.toFixed(2) }}
+                [{{ fmtTime(c.fromTs) }} → {{ fmtTime(c.toTs) }}] bi[{{ c.biStartIdx }}..{{ c.biEndIdx }}]
+              </div>
+            </div>
+            <div class="diag-section" v-if="segDiagResult.dualCS.csB && segDiagResult.dualCS.csB.length > 0">
+              <div class="diag-label">CS-B 元素链 (同向笔，不做包含)</div>
+              <div
+                v-for="(c, ci) in segDiagResult.dualCS.csB"
+                :key="'csb-'+ci"
+                class="diag-rule"
+                :class="{
+                  'cs-a': segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[0],
+                  'cs-b': segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[1],
+                  'cs-c': segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[2],
+                }"
+              >
+                <template v-if="segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[0]">[a]</template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[1]">[b]</template>
+                <template v-else-if="segDiagResult.dualCS.trigger === 'csB_fractal' && ci === segDiagResult.dualCS.triggerFractalIdx[2]">[c]</template>
+                <template v-else>#{{ ci }}</template>
+                high={{ c.high.toFixed(2) }} low={{ c.low.toFixed(2) }}
+                [{{ fmtTime(c.fromTs) }} → {{ fmtTime(c.toTs) }}] bi[{{ c.biStartIdx }}..{{ c.biEndIdx }}]
+              </div>
+            </div>
+            <div v-if="segDiagResult.dualCS.anotherTransition" class="diag-sub">
+              CS-B 另一转折点：{{ fmtTime(segDiagResult.dualCS.anotherTransition.timestamp) }} 价 {{ segDiagResult.dualCS.anotherTransition.price.toFixed(2) }}
+            </div>
+          </template>
         </template>
       </div>
 

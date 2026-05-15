@@ -422,6 +422,9 @@ onBeforeUnmount(() => {
         :bis="bis"
         :period="period"
         :code="code"
+        :use-realtime="useRealtime"
+        :use-local="useLocal"
+        :cutoff-date="cutoffDate"
         @pick="jumpToTimestamp"
       />
     </div>
