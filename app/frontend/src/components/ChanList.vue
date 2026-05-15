@@ -25,6 +25,7 @@ const emit = defineEmits<{
 }>()
 
 const tab = ref<'fractals' | 'bis' | 'diag'>('bis')
+const diagMode = ref<'bi' | 'segment'>('bi')
 
 // 诊断输入
 const diagFrom = ref('')
@@ -33,25 +34,49 @@ const diagResult = ref<any>(null)
 const diagLoading = ref(false)
 const diagError = ref('')
 
+// 段诊断输入
+const segDiagStart = ref('')
+const segDiagResult = ref<any>(null)
+
 async function runDiag() {
   diagError.value = ''
   diagResult.value = null
-  if (!diagFrom.value || !diagTo.value) {
-    diagError.value = '请输入两个日期 (YYYY-MM-DD)'
-    return
-  }
-  diagLoading.value = true
-  try {
-    diagResult.value = await window.go.main.App.DiagnoseBi(
-      props.code,
-      props.period,
-      diagFrom.value,
-      diagTo.value,
-    )
-  } catch (e: any) {
-    diagError.value = String(e?.message ?? e)
-  } finally {
-    diagLoading.value = false
+  segDiagResult.value = null
+  if (diagMode.value === 'bi') {
+    if (!diagFrom.value || !diagTo.value) {
+      diagError.value = '请输入两个日期 (YYYY-MM-DD)'
+      return
+    }
+    diagLoading.value = true
+    try {
+      diagResult.value = await window.go.main.App.DiagnoseBi(
+        props.code,
+        props.period,
+        diagFrom.value,
+        diagTo.value,
+      )
+    } catch (e: any) {
+      diagError.value = String(e?.message ?? e)
+    } finally {
+      diagLoading.value = false
+    }
+  } else {
+    if (!segDiagStart.value) {
+      diagError.value = '请输入段起点日期'
+      return
+    }
+    diagLoading.value = true
+    try {
+      segDiagResult.value = await window.go.main.App.DiagnoseSegment(
+        props.code,
+        props.period,
+        segDiagStart.value,
+      )
+    } catch (e: any) {
+      diagError.value = String(e?.message ?? e)
+    } finally {
+      diagLoading.value = false
+    }
   }
 }
 
@@ -142,7 +167,17 @@ const bisDesc = computed(() => [...props.bis].reverse())
     </div>
 
     <div v-else class="diag">
-      <div class="diag-form">
+      <div class="diag-mode-switch">
+        <label>
+          <input type="radio" v-model="diagMode" value="bi" />
+          笔诊断
+        </label>
+        <label>
+          <input type="radio" v-model="diagMode" value="segment" />
+          段诊断
+        </label>
+      </div>
+      <div v-if="diagMode === 'bi'" class="diag-form">
         <label>
           起点
           <input v-model="diagFrom" placeholder="1997-05-30" />
@@ -155,6 +190,65 @@ const bisDesc = computed(() => [...props.bis].reverse())
           {{ diagLoading ? '诊断中…' : '诊断笔' }}
         </button>
         <div v-if="diagError" class="err">{{ diagError }}</div>
+      </div>
+      <div v-else class="diag-form">
+        <label>
+          段起点
+          <input v-model="segDiagStart" placeholder="2021-02-05" />
+        </label>
+        <button :disabled="diagLoading" @click="runDiag">
+          {{ diagLoading ? '诊断中…' : '诊断段' }}
+        </button>
+        <div v-if="diagError" class="err">{{ diagError }}</div>
+      </div>
+
+      <div v-if="segDiagResult" class="diag-result">
+        <div v-if="!segDiagResult.found" class="diag-note">
+          {{ segDiagResult.note }}
+        </div>
+        <template v-else>
+          <div class="diag-section">
+            <div class="diag-label">线段</div>
+            <div>方向 {{ segDiagResult.direction === 'up' ? '向上 ↑' : '向下 ↓' }}</div>
+            <div class="diag-sub">起点 {{ fmtTime(segDiagResult.segFrom.timestamp) }} 价 {{ segDiagResult.segFrom.price.toFixed(2) }}</div>
+            <div class="diag-sub">终点 {{ fmtTime(segDiagResult.segTo.timestamp) }} 价 {{ segDiagResult.segTo.price.toFixed(2) }}</div>
+            <div class="diag-sub">
+              <template v-if="segDiagResult.terminationCase === 1">终止于 第一种情况（无缺口）</template>
+              <template v-else-if="segDiagResult.terminationCase === 2">终止于 第二种情况（有缺口）</template>
+              <template v-else>未终止</template>
+              <template v-if="segDiagResult.subcase === 1">· subcase 1a</template>
+              <template v-else-if="segDiagResult.subcase === 2">· subcase 1b</template>
+            </div>
+            <div v-if="segDiagResult.anotherTransition" class="diag-sub">
+              另一转折点 {{ fmtTime(segDiagResult.anotherTransition.timestamp) }} 价 {{ segDiagResult.anotherTransition.price.toFixed(2) }}
+            </div>
+          </div>
+          <div class="diag-section">
+            <div class="diag-label">缺口判定</div>
+            <div class="diag-rule">{{ segDiagResult.gapDescription }}</div>
+          </div>
+          <div class="diag-section">
+            <div class="diag-label">第一CS 元素链 (前包后合并后)</div>
+            <div
+              v-for="(c, ci) in segDiagResult.csA"
+              :key="ci"
+              class="diag-rule"
+              :class="{
+                'cs-a': segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[0],
+                'cs-b': segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[1],
+                'cs-c': segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[2],
+              }"
+            >
+              <template v-if="segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[0]">[a]</template>
+              <template v-else-if="segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[1]">[b]</template>
+              <template v-else-if="segDiagResult.fractalIdx && ci === segDiagResult.fractalIdx[2]">[c]</template>
+              <template v-else>#{{ ci }}</template>
+              high={{ c.high.toFixed(2) }} low={{ c.low.toFixed(2) }}
+              [{{ fmtTime(c.fromTs) }} → {{ fmtTime(c.toTs) }}] bi[{{ c.biStartIdx }}..{{ c.biEndIdx }}]
+            </div>
+          </div>
+          <div v-if="segDiagResult.note" class="diag-note">{{ segDiagResult.note }}</div>
+        </template>
       </div>
 
       <div v-if="diagResult" class="diag-result">
@@ -396,5 +490,30 @@ const bisDesc = computed(() => [...props.bis].reverse())
 }
 .diag-note {
   color: #f87171;
+}
+.diag-mode-switch {
+  display: flex;
+  gap: 12px;
+  padding: 8px 10px 0;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.diag-mode-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.diag-rule.cs-a {
+  color: #f87171;
+  font-weight: 600;
+}
+.diag-rule.cs-b {
+  color: #fbbf24;
+  font-weight: 600;
+}
+.diag-rule.cs-c {
+  color: #38bdf8;
+  font-weight: 600;
 }
 </style>

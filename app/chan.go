@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+	"time"
+)
 
 // 缠论基础结构：包含关系处理、分型识别、笔的构造（新笔规则）
 
@@ -1053,6 +1057,171 @@ func ternaryString(cond bool, a, b string) string {
 		return a
 	}
 	return b
+}
+
+// ============================================================
+//  线段诊断
+// ============================================================
+
+// CSAItem 线段诊断中输出的 CS 元素（合并后）
+type CSAItem struct {
+	High       float64 `json:"high"`
+	Low        float64 `json:"low"`
+	FromTs     int64   `json:"fromTs"`
+	ToTs       int64   `json:"toTs"`
+	BiStartIdx int     `json:"biStartIdx"`
+	BiEndIdx   int     `json:"biEndIdx"`
+}
+
+// SegmentDiag 段诊断结果
+type SegmentDiag struct {
+	Found             bool       `json:"found"`
+	Note              string     `json:"note"`
+	SegFrom           *Fractal   `json:"segFrom,omitempty"`
+	SegTo             *Fractal   `json:"segTo,omitempty"`
+	Direction         string     `json:"direction,omitempty"`
+	TerminationCase   int        `json:"terminationCase"`
+	Subcase           int        `json:"subcase"`
+	CSA               []CSAItem  `json:"csA,omitempty"`        // 终止时 CS-A 的所有元素（前包后合并后）
+	FractalIdx        [3]int     `json:"fractalIdx,omitempty"` // 顶/底分型 a, b, c 在 CSA 中的下标
+	HasGap            bool       `json:"hasGap"`
+	GapDescription    string     `json:"gapDescription,omitempty"`
+	AnotherTransition *Fractal   `json:"anotherTransition,omitempty"`
+}
+
+// diagnoseSegmentTrace 给定一条 Segment 的位置，重跑 第一CS 扫描，捕获终止时 CS-A 状态
+//
+//	返回 (csA, [a, b, c]在 csA 中的下标, found)
+func diagnoseSegmentTrace(biSeq []SeqElem, segStart, endBiIdx int, direction string) ([]SeqElem, [3]int, bool) {
+	var csA []SeqElem
+	targetBiIdx := endBiIdx + 1 // 破坏笔下标 = 顶分型中间元素 b 的 biStartIdx
+
+	for j := segStart + 1; j < len(biSeq); j++ {
+		elem := biSeq[j]
+		if elem.Direction == direction {
+			continue
+		}
+		csA = addToCSFrontContains(csA, elem, direction)
+		if len(csA) >= 3 {
+			a, b, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
+			isFractal := false
+			if direction == "up" && seqIsTop(a, b, c) {
+				isFractal = true
+			} else if direction == "down" && seqIsBottom(a, b, c) {
+				isFractal = true
+			}
+			if isFractal && b.BiStartIdx == targetBiIdx {
+				return csA, [3]int{len(csA) - 3, len(csA) - 2, len(csA) - 1}, true
+			}
+		}
+	}
+	return csA, [3]int{-1, -1, -1}, false
+}
+
+// findSegmentByStartTs 在已构建的 segments 中按起点时间戳前缀匹配找到目标线段，
+// 返回索引；找不到返回 -1
+func findSegmentByStartTs(segments []Segment, startTsPrefix string, loc *time.Location) int {
+	if loc == nil {
+		loc, _ = time.LoadLocation("Asia/Shanghai")
+	}
+	for i, s := range segments {
+		ts := s.From.Timestamp
+		formatted := time.UnixMilli(ts).In(loc).Format("2006-01-02 15:04:05")
+		if strings.HasPrefix(formatted, startTsPrefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// DiagnoseSegmentFromBis 从 bis + 段起点日期前缀做段诊断
+//
+//	startDatePrefix: 形如 "2021-02-05" 或 "2021-02-05 09:30"
+func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	segments := buildSegments(bis)
+	idx := findSegmentByStartTs(segments, startDatePrefix, loc)
+	if idx < 0 {
+		return SegmentDiag{
+			Found: false,
+			Note:  fmt.Sprintf("未找到起点匹配 %q 的线段（共 %d 段）", startDatePrefix, len(segments)),
+		}
+	}
+
+	seg := segments[idx]
+	biSeq := buildBiSeq(bis)
+
+	// 找 segStart：bis[k].From.Timestamp == seg.From.Timestamp
+	segStart := -1
+	for k := range bis {
+		if bis[k].From.Timestamp == seg.From.Timestamp {
+			segStart = k
+			break
+		}
+	}
+	// 找 endBiIdx：bis[k].To.Timestamp == seg.To.Timestamp
+	endBiIdx := -1
+	for k := range bis {
+		if bis[k].To.Timestamp == seg.To.Timestamp {
+			endBiIdx = k
+			break
+		}
+	}
+
+	diag := SegmentDiag{
+		Found:             true,
+		SegFrom:           &seg.From,
+		SegTo:             &seg.To,
+		Direction:         seg.Direction,
+		TerminationCase:   seg.TerminationCase,
+		Subcase:           seg.Subcase,
+		AnotherTransition: seg.AnotherTransition,
+	}
+
+	if segStart < 0 || endBiIdx < 0 {
+		diag.Note = "段起止笔在 bis 中索引失败"
+		return diag
+	}
+
+	csA, fxIdx, traced := diagnoseSegmentTrace(biSeq, segStart, endBiIdx, seg.Direction)
+	diag.CSA = make([]CSAItem, len(csA))
+	for i, e := range csA {
+		diag.CSA[i] = CSAItem{
+			High:       e.High,
+			Low:        e.Low,
+			FromTs:     e.FromTimestamp,
+			ToTs:       e.ToTimestamp,
+			BiStartIdx: e.BiStartIdx,
+			BiEndIdx:   e.BiEndIdx,
+		}
+	}
+
+	if traced {
+		diag.FractalIdx = fxIdx
+		a, b := csA[fxIdx[0]], csA[fxIdx[1]]
+		fractalType := "top"
+		if seg.Direction == "down" {
+			fractalType = "bottom"
+		}
+		diag.HasGap = seqHasGap(a, b, fractalType)
+		if diag.HasGap {
+			if fractalType == "top" {
+				diag.GapDescription = fmt.Sprintf("顶分型 第二种情况：a.high=%.2f < b.low=%.2f（缺口 %.2f）", a.High, b.Low, b.Low-a.High)
+			} else {
+				diag.GapDescription = fmt.Sprintf("底分型 第二种情况：a.low=%.2f > b.high=%.2f（缺口 %.2f）", a.Low, b.High, a.Low-b.High)
+			}
+		} else {
+			if fractalType == "top" {
+				diag.GapDescription = fmt.Sprintf("顶分型 第一种情况：a.high=%.2f ≥ b.low=%.2f（区间重叠）", a.High, b.Low)
+			} else {
+				diag.GapDescription = fmt.Sprintf("底分型 第一种情况：a.low=%.2f ≤ b.high=%.2f（区间重叠）", a.Low, b.High)
+			}
+		}
+	} else {
+		diag.Note = "未能复现终止时的 第一CS 顶分型；CSA 输出的是扫描结束时的状态"
+	}
+
+	return diag
 }
 
 // AnalyzeChan 把缠论分析输出聚合，供 GetKline 一次性返回

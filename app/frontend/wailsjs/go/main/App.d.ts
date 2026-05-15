@@ -6,6 +6,8 @@ export function AddToWatchlist(arg1:string):Promise<Array<main.WatchItem>>;
 
 export function DiagnoseBi(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.BiDiagnosis>;
 
+export function DiagnoseSegment(arg1:string,arg2:string,arg3:string):Promise<main.SegmentDiag>;
+
 export function GetKline(arg1:string,arg2:string,arg3:number,arg4:boolean,arg5:boolean,arg6:string):Promise<main.KlineWithChan>;
 
 export function GetSettings():Promise<main.Settings>;

@@ -148,35 +148,70 @@ function drawChan() {
       const startStyle = startCase === 2 ? LineType.Dashed : LineType.Solid
       const endStyle = endCase === 2 ? LineType.Dashed : LineType.Solid
 
-      const midTs = Math.round((seg.from.timestamp + seg.to.timestamp) / 2)
-      const midPrice = (seg.from.price + seg.to.price) / 2
+      // 两端线型相同 → 直接画一根，无需切分
+      if (startStyle === endStyle) {
+        chart.createOverlay({
+          name: 'segment',
+          points: [
+            { timestamp: seg.from.timestamp, value: seg.from.price },
+            { timestamp: seg.to.timestamp, value: seg.to.price },
+          ],
+          lock: true,
+          styles: {
+            line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
+            point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+          },
+        })
+      } else {
+        // 线型不同 → 按数据下标算中点（不是按时间戳，避免周末/节假日导致弯折）
+        const idxFrom = props.data.findIndex(d => d.timestamp === seg.from.timestamp)
+        const idxTo = props.data.findIndex(d => d.timestamp === seg.to.timestamp)
+        if (idxFrom < 0 || idxTo < 0 || idxTo === idxFrom) {
+          // 退化：找不到下标就画整根，按 startStyle
+          chart.createOverlay({
+            name: 'segment',
+            points: [
+              { timestamp: seg.from.timestamp, value: seg.from.price },
+              { timestamp: seg.to.timestamp, value: seg.to.price },
+            ],
+            lock: true,
+            styles: {
+              line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
+              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+            },
+          })
+        } else {
+          const idxMid = Math.round((idxFrom + idxTo) / 2)
+          const midTs = props.data[idxMid].timestamp
+          const ratio = (idxMid - idxFrom) / (idxTo - idxFrom)
+          const midPrice = seg.from.price + (seg.to.price - seg.from.price) * ratio
 
-      // 前半段：from → mid，按 startCase 决定虚实
-      chart.createOverlay({
-        name: 'segment',
-        points: [
-          { timestamp: seg.from.timestamp, value: seg.from.price },
-          { timestamp: midTs, value: midPrice },
-        ],
-        lock: true,
-        styles: {
-          line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
-          point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
-        },
-      })
-      // 后半段：mid → to，按 endCase 决定虚实
-      chart.createOverlay({
-        name: 'segment',
-        points: [
-          { timestamp: midTs, value: midPrice },
-          { timestamp: seg.to.timestamp, value: seg.to.price },
-        ],
-        lock: true,
-        styles: {
-          line: { color: SEG_COLOR, size: 3, style: endStyle, dashedValue: [6, 4] },
-          point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
-        },
-      })
+          chart.createOverlay({
+            name: 'segment',
+            points: [
+              { timestamp: seg.from.timestamp, value: seg.from.price },
+              { timestamp: midTs, value: midPrice },
+            ],
+            lock: true,
+            styles: {
+              line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
+              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+            },
+          })
+          chart.createOverlay({
+            name: 'segment',
+            points: [
+              { timestamp: midTs, value: midPrice },
+              { timestamp: seg.to.timestamp, value: seg.to.price },
+            ],
+            lock: true,
+            styles: {
+              line: { color: SEG_COLOR, size: 3, style: endStyle, dashedValue: [6, 4] },
+              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+            },
+          })
+        }
+      }
 
       // 另一转折点：从 To 到 anotherTransition，紫色 3px（暂不分虚实）
       if (seg.anotherTransition) {

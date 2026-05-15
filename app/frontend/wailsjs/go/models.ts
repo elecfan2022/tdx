@@ -116,6 +116,28 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class CSAItem {
+	    high: number;
+	    low: number;
+	    fromTs: number;
+	    toTs: number;
+	    biStartIdx: number;
+	    biEndIdx: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CSAItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.high = source["high"];
+	        this.low = source["low"];
+	        this.fromTs = source["fromTs"];
+	        this.toTs = source["toTs"];
+	        this.biStartIdx = source["biStartIdx"];
+	        this.biEndIdx = source["biEndIdx"];
+	    }
+	}
 	
 	export class KlineBar {
 	    timestamp: number;
@@ -218,6 +240,58 @@ export namespace main {
 		}
 	}
 	
+	export class SegmentDiag {
+	    found: boolean;
+	    note: string;
+	    segFrom?: Fractal;
+	    segTo?: Fractal;
+	    direction?: string;
+	    terminationCase: number;
+	    subcase: number;
+	    csA?: CSAItem[];
+	    fractalIdx?: number[];
+	    hasGap: boolean;
+	    gapDescription?: string;
+	    anotherTransition?: Fractal;
+	
+	    static createFrom(source: any = {}) {
+	        return new SegmentDiag(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.found = source["found"];
+	        this.note = source["note"];
+	        this.segFrom = this.convertValues(source["segFrom"], Fractal);
+	        this.segTo = this.convertValues(source["segTo"], Fractal);
+	        this.direction = source["direction"];
+	        this.terminationCase = source["terminationCase"];
+	        this.subcase = source["subcase"];
+	        this.csA = this.convertValues(source["csA"], CSAItem);
+	        this.fractalIdx = source["fractalIdx"];
+	        this.hasGap = source["hasGap"];
+	        this.gapDescription = source["gapDescription"];
+	        this.anotherTransition = this.convertValues(source["anotherTransition"], Fractal);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Settings {
 	    tdxDir: string;
 	

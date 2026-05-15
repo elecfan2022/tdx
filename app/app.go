@@ -434,6 +434,17 @@ func (a *App) DiagnoseBi(code, period, fromDate, toDate string) (*BiDiagnosis, e
 	return diag, nil
 }
 
+// DiagnoseSegment 段诊断：按段起点日期前缀（"YYYY-MM-DD" 或 "YYYY-MM-DD HH:MM"）
+// 找到对应线段，输出终止时 第一CS 的元素链路、顶/底分型 a/b/c 位置、缺口判定细节。
+func (a *App) DiagnoseSegment(code, period, startDatePrefix string) (*SegmentDiag, error) {
+	resp, err := a.GetKline(code, period, 5000, true, false, "")
+	if err != nil {
+		return nil, err
+	}
+	diag := DiagnoseSegmentFromBis(resp.Bis, startDatePrefix)
+	return &diag, nil
+}
+
 // StockInfo 给前端的个股标识
 type StockInfo struct {
 	Code     string `json:"code"`     // 6 位
