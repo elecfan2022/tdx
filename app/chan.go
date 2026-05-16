@@ -672,19 +672,23 @@ type Segment struct {
 
 // segmentEndResult 内部封装 findSegmentEnd 的返回
 type segmentEndResult struct {
-	confirmed         bool
-	endBiIdx          int      // 段终止笔下标（在 biSeq 中）
-	transition        Fractal  // 主转折点
-	anotherTransition *Fractal // 另一转折点（可空）
-	termCase          int
-	subcase           int
-	triggerBiIdx      int // 仅 subcase 1a 终止时设置；其他情况 0 表示不回退
+	confirmed              bool
+	endBiIdx               int      // 段终止笔下标（在 biSeq 中）
+	transition             Fractal  // 主转折点
+	anotherTransition      *Fractal // 另一转折点（可空）
+	termCase               int
+	subcase                int
+	triggerBiIdx           int // 仅 subcase 1a CS-A fractal 触发时设置（>0）；下一段 CS 扫描从此 -1 起
+	anotherTransitionBiIdx int // 仅 subcase 1a CS-B fractal 触发时设置（>0）；派生中间段后下一段 segStart 用此值
 }
 
 // buildSegments 从笔列表构建线段列表
 //
-//	每段终止时若是 subcase 1a，记录 triggerBiIdx。下一段的 CS-A 主扫描
-//	从 max(segStart+1, prevTriggerBiIdx-1) 起；其他终止方式默认 segStart+1。
+//	subcase 1a 触发路径分支：
+//	  CS-A fractal: 设 triggerBiIdx → 下一段 scanFromBi = trigger - 1
+//	  CS-B fractal: 设 anotherTransitionBiIdx → 派生中间段（方向相反，From=主转折点，
+//	                To=另一转折点），下一段 segStart = anotherTransitionBiIdx，不回退
+//	  break_end:    都不设 → 下一段自然扫描 segStart + 1
 func buildSegments(bis []Bi) []Segment {
 	if len(bis) < 3 {
 		return nil
@@ -692,7 +696,7 @@ func buildSegments(bis []Bi) []Segment {
 	biSeq := buildBiSeq(bis)
 	var segments []Segment
 	segStart := 0
-	prevTriggerBiIdx := 0 // 上一段触发笔下标；0 表示首段或上一段非 subcase 1a
+	prevTriggerBiIdx := 0 // 上一段 CS-A fractal trigger 下标；0 表示不回退
 
 	for segStart < len(biSeq)-2 {
 		direction := biSeq[segStart].Direction
@@ -723,6 +727,27 @@ func buildSegments(bis []Bi) []Segment {
 			TriggerBiIdx:      result.triggerBiIdx,
 		}
 		segments = append(segments, seg)
+
+		// CS-B fractal 触发：派生中间段
+		if result.anotherTransitionBiIdx > 0 && result.anotherTransition != nil {
+			oppositeDir := "down"
+			if direction == "down" {
+				oppositeDir = "up"
+			}
+			midSeg := Segment{
+				From:            result.transition,
+				To:              *result.anotherTransition,
+				Direction:       oppositeDir,
+				TerminationCase: 3, // 3 = CS-B 派生中间段
+				Subcase:         0,
+				TriggerBiIdx:    0,
+			}
+			segments = append(segments, midSeg)
+			segStart = result.anotherTransitionBiIdx
+			prevTriggerBiIdx = 0 // 中间段后不触发回退
+			continue
+		}
+
 		segStart = result.endBiIdx + 1
 		prevTriggerBiIdx = result.triggerBiIdx
 	}
@@ -831,6 +856,24 @@ func addToCSFrontContains(cs []SeqElem, elem SeqElem, segDirection string) []Seq
 		return cs
 	}
 	return append(cs, elem)
+}
+
+// filterCSBInRange 从 csB 中剔除 BiStartIdx 严格落在 (lower, upper) 之间的元素。
+//
+//	subcase 1a 双 CS 验证里，当 CS-A 发生 前包后 合并（合并区间 oldEnd → newEnd），
+//	区间内夹的同向笔在 缠论 包含处理 意义上被吸收，不应再作为 CS-B 的独立元素。
+//	入参 lower = 合并前 csA[-1].BiEndIdx；upper = 合并后 csA[-1].BiEndIdx（= elem.BiEndIdx）
+func filterCSBInRange(csB []SeqElem, lower, upper int) []SeqElem {
+	if len(csB) == 0 || upper-lower <= 1 {
+		return csB
+	}
+	out := csB[:0]
+	for _, e := range csB {
+		if e.BiStartIdx <= lower || e.BiStartIdx >= upper {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // addToCSBoth 把 elem 加入 cs，应用"前后都可以"包含合并
@@ -967,7 +1010,13 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 		// 第一步：CS 更新 + 分型检查（分型优先于破点）
 		if elem.Direction != direction {
 			// 反向笔 → CS-A 前包后
+			oldLen := len(csA)
+			oldEnd := csA[oldLen-1].BiEndIdx // 合并前的 BiEndIdx（用于检测合并范围）
 			csA = addToCSFrontContains(csA, elem, direction)
+			if len(csA) == oldLen {
+				// 发生合并：剔除 CS-B 中落在合并区间内部的元素
+				csB = filterCSBInRange(csB, oldEnd, elem.BiEndIdx)
+			}
 			if len(csA) >= 3 {
 				a, bm, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
 				if (direction == "up" && seqIsTop(a, bm, c)) ||
@@ -998,13 +1047,13 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 				if ok {
 					anotherFx := makeFractalAt(bm, opposite)
 					return segmentEndResult{
-						confirmed:         true,
-						endBiIdx:          breakingIdx - 1,
-						transition:        mainTransition,
-						anotherTransition: &anotherFx,
-						termCase:          1,
-						subcase:           1,
-						triggerBiIdx:      j,
+						confirmed:              true,
+						endBiIdx:               breakingIdx - 1,
+						transition:             mainTransition,
+						anotherTransition:      &anotherFx,
+						termCase:               1,
+						subcase:                1,
+						anotherTransitionBiIdx: bm.BiStartIdx, // CS-B 不做包含，bm 是单根笔；buildSegments 据此派生中间段并把下一段 segStart 设到这里
 					}
 				}
 			}
@@ -1016,14 +1065,13 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 				return segmentEndResult{confirmed: false} // 破开始点 → 段延续
 			}
 			if elem.Low < breakingLow {
-				// 破结束点 → 终止
+				// 破结束点 → 终止（不设 triggerBiIdx：break_end 无 trio 结构，下一段自然扫描）
 				return segmentEndResult{
-					confirmed:    true,
-					endBiIdx:     breakingIdx - 1,
-					transition:   mainTransition,
-					termCase:     1,
-					subcase:      1,
-					triggerBiIdx: j,
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
 				}
 			}
 		} else {
@@ -1032,12 +1080,11 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 			}
 			if elem.High > breakingHigh {
 				return segmentEndResult{
-					confirmed:    true,
-					endBiIdx:     breakingIdx - 1,
-					transition:   mainTransition,
-					termCase:     1,
-					subcase:      1,
-					triggerBiIdx: j,
+					confirmed:  true,
+					endBiIdx:   breakingIdx - 1,
+					transition: mainTransition,
+					termCase:   1,
+					subcase:    1,
 				}
 			}
 		}
@@ -1221,7 +1268,12 @@ func traceSubcase1aDualCS(biSeq []SeqElem, b SeqElem, direction string) *DualCSD
 
 		// 第一步：CS 更新 + 分型检查
 		if elem.Direction != direction {
+			oldLen := len(csA)
+			oldEnd := csA[oldLen-1].BiEndIdx
 			csA = addToCSFrontContains(csA, elem, direction)
+			if len(csA) == oldLen {
+				csB = filterCSBInRange(csB, oldEnd, elem.BiEndIdx)
+			}
 			if len(csA) >= 3 {
 				a, bm, c := csA[len(csA)-3], csA[len(csA)-2], csA[len(csA)-1]
 				if (direction == "up" && seqIsTop(a, bm, c)) ||
@@ -1389,6 +1441,12 @@ func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
 		TerminationCase:   seg.TerminationCase,
 		Subcase:           seg.Subcase,
 		AnotherTransition: seg.AnotherTransition,
+	}
+
+	// 派生中间段（来自上一段 CS-B fractal）：无独立 CS-A 扫描，直接返回基本信息
+	if seg.TerminationCase == 3 {
+		diag.Note = "派生中间段：由上一段 subcase 1a CS-B 顶/底分型 同步确认，无独立 CS 扫描轨迹"
+		return diag
 	}
 
 	if segStart < 0 || endBiIdx < 0 {
