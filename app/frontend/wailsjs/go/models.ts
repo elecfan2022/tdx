@@ -215,6 +215,7 @@ export namespace main {
 	    terminationCase: number;
 	    subcase: number;
 	    triggerBiIdx: number;
+	    anomalous: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Segment(source);
@@ -229,6 +230,7 @@ export namespace main {
 	        this.terminationCase = source["terminationCase"];
 	        this.subcase = source["subcase"];
 	        this.triggerBiIdx = source["triggerBiIdx"];
+	        this.anomalous = source["anomalous"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

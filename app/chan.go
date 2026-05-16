@@ -668,6 +668,7 @@ type Segment struct {
 	TerminationCase   int      `json:"terminationCase"`
 	Subcase           int      `json:"subcase"`
 	TriggerBiIdx      int      `json:"triggerBiIdx"` // 仅 subcase 1a 触发段时设置 (>0)；下一段 CS 扫描从此值-1 起
+	Anomalous         bool     `json:"anomalous"`    // 段内相邻同向笔无重合 → true（异常，前端标红）
 }
 
 // segmentEndResult 内部封装 findSegmentEnd 的返回
@@ -753,6 +754,62 @@ func buildSegments(bis []Bi) []Segment {
 		prevTriggerBiIdx = result.triggerBiIdx
 	}
 	return segments
+}
+
+// validateSegments 校验每段是否符合缠论 向上/向下段 的基本结构性质。
+//
+//	违反任一规则则 seg.Anomalous = true（前端标红）：
+//	  规则 1：向上段，任何相邻两根向上笔之间有重合区间
+//	  规则 2：向下段，任何相邻两根向下笔之间有重合区间
+//	  规则 3：段由连续 3 笔或更多奇数笔构成
+//
+//	"相邻"指段内同向笔按时间序过滤后下标连续的两根。
+//	"重合"判定：max(low₁, low₂) <= min(high₁, high₂)。
+//	"段内"判定：bi.From.Timestamp >= seg.From.Timestamp 且
+//	             bi.To.Timestamp <= seg.To.Timestamp。
+func validateSegments(segments []Segment, bis []Bi) {
+	for i := range segments {
+		seg := &segments[i]
+
+		// 收集段范围内所有笔
+		var inRange []Bi
+		for _, bi := range bis {
+			if bi.From.Timestamp < seg.From.Timestamp || bi.To.Timestamp > seg.To.Timestamp {
+				continue
+			}
+			inRange = append(inRange, bi)
+		}
+
+		// 规则 3：笔数必须 ≥ 3 且奇数
+		if len(inRange) < 3 || len(inRange)%2 == 0 {
+			seg.Anomalous = true
+			continue
+		}
+
+		// 规则 1/2：相邻同向笔重合
+		var sameDir []Bi
+		for _, bi := range inRange {
+			biDir := "up"
+			if bi.From.Type == "top" {
+				biDir = "down"
+			}
+			if biDir == seg.Direction {
+				sameDir = append(sameDir, bi)
+			}
+		}
+		for k := 1; k < len(sameDir); k++ {
+			p := sameDir[k-1]
+			c := sameDir[k]
+			pHigh := maxF(p.From.Price, p.To.Price)
+			pLow := minF(p.From.Price, p.To.Price)
+			cHigh := maxF(c.From.Price, c.To.Price)
+			cLow := minF(c.From.Price, c.To.Price)
+			if maxF(pLow, cLow) > minF(pHigh, cHigh) {
+				seg.Anomalous = true
+				break
+			}
+		}
+	}
 }
 
 // directionFromType 从段方向得出起点分型类型
@@ -1541,6 +1598,7 @@ func AnalyzeChan(klines []KlineBar) ChanAnalysis {
 	fractals := findFractals(processed, klines)
 	bis := buildBi(fractals, klines)
 	segments := buildSegments(bis)
+	validateSegments(segments, bis)
 	if fractals == nil {
 		fractals = []Fractal{}
 	}

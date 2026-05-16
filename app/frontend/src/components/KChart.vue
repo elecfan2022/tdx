@@ -71,6 +71,7 @@ interface Segment {
   anotherTransition?: Fractal | null
   terminationCase: number
   subcase: number
+  anomalous?: boolean
 }
 
 const props = defineProps<{
@@ -97,6 +98,7 @@ const BOTTOM_COLOR = '#10B981' // 底分型 绿
 const BI_COLOR = '#FBBF24'     // 笔 黄
 const SEG_COLOR = '#38BDF8'    // 线段主端点 青蓝
 const SEG_ALT_COLOR = '#A855F7' // 线段 另一转折点 紫
+const SEG_ANOMALY_COLOR = '#EF4444' // 异常线段（相邻同向笔无重合）红
 
 function drawChan() {
   if (!chart) return
@@ -148,6 +150,10 @@ function drawChan() {
       const startStyle = startCase === 2 ? LineType.Dashed : LineType.Solid
       const endStyle = endCase === 2 ? LineType.Dashed : LineType.Solid
 
+      // 异常段（相邻同向笔无重合）→ 主线红色，另一转折点也用红色
+      const lineColor = seg.anomalous ? SEG_ANOMALY_COLOR : SEG_COLOR
+      const altLineColor = seg.anomalous ? SEG_ANOMALY_COLOR : SEG_ALT_COLOR
+
       // 两端线型相同 → 直接画一根，无需切分
       if (startStyle === endStyle) {
         chart.createOverlay({
@@ -158,8 +164,8 @@ function drawChan() {
           ],
           lock: true,
           styles: {
-            line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
-            point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+            line: { color: lineColor, size: 3, style: startStyle, dashedValue: [6, 4] },
+            point: { activeColor: lineColor, color: lineColor, borderColor: lineColor },
           },
         })
       } else {
@@ -176,8 +182,8 @@ function drawChan() {
             ],
             lock: true,
             styles: {
-              line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
-              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+              line: { color: lineColor, size: 3, style: startStyle, dashedValue: [6, 4] },
+              point: { activeColor: lineColor, color: lineColor, borderColor: lineColor },
             },
           })
         } else {
@@ -194,8 +200,8 @@ function drawChan() {
             ],
             lock: true,
             styles: {
-              line: { color: SEG_COLOR, size: 3, style: startStyle, dashedValue: [6, 4] },
-              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+              line: { color: lineColor, size: 3, style: startStyle, dashedValue: [6, 4] },
+              point: { activeColor: lineColor, color: lineColor, borderColor: lineColor },
             },
           })
           chart.createOverlay({
@@ -206,14 +212,14 @@ function drawChan() {
             ],
             lock: true,
             styles: {
-              line: { color: SEG_COLOR, size: 3, style: endStyle, dashedValue: [6, 4] },
-              point: { activeColor: SEG_COLOR, color: SEG_COLOR, borderColor: SEG_COLOR },
+              line: { color: lineColor, size: 3, style: endStyle, dashedValue: [6, 4] },
+              point: { activeColor: lineColor, color: lineColor, borderColor: lineColor },
             },
           })
         }
       }
 
-      // 另一转折点：从 To 到 anotherTransition，紫色 3px（暂不分虚实）
+      // 另一转折点：从 To 到 anotherTransition，紫色 3px（异常段为红色）
       if (seg.anotherTransition) {
         chart.createOverlay({
           name: 'segment',
@@ -223,8 +229,8 @@ function drawChan() {
           ],
           lock: true,
           styles: {
-            line: { color: SEG_ALT_COLOR, size: 3 },
-            point: { activeColor: SEG_ALT_COLOR, color: SEG_ALT_COLOR, borderColor: SEG_ALT_COLOR },
+            line: { color: altLineColor, size: 3 },
+            point: { activeColor: altLineColor, color: altLineColor, borderColor: altLineColor },
           },
         })
       }
