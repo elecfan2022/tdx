@@ -214,6 +214,7 @@ export namespace main {
 	    anotherTransition?: Fractal;
 	    terminationCase: number;
 	    subcase: number;
+	    triggerBiIdx: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Segment(source);
@@ -227,6 +228,7 @@ export namespace main {
 	        this.anotherTransition = this.convertValues(source["anotherTransition"], Fractal);
 	        this.terminationCase = source["terminationCase"];
 	        this.subcase = source["subcase"];
+	        this.triggerBiIdx = source["triggerBiIdx"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

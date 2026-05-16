@@ -667,6 +667,7 @@ type Segment struct {
 	AnotherTransition *Fractal `json:"anotherTransition,omitempty"`
 	TerminationCase   int      `json:"terminationCase"`
 	Subcase           int      `json:"subcase"`
+	TriggerBiIdx      int      `json:"triggerBiIdx"` // 仅 subcase 1a 触发段时设置 (>0)；下一段 CS 扫描从此值-1 起
 }
 
 // segmentEndResult 内部封装 findSegmentEnd 的返回
@@ -677,9 +678,13 @@ type segmentEndResult struct {
 	anotherTransition *Fractal // 另一转折点（可空）
 	termCase          int
 	subcase           int
+	triggerBiIdx      int // 仅 subcase 1a 终止时设置；其他情况 0 表示不回退
 }
 
 // buildSegments 从笔列表构建线段列表
+//
+//	每段终止时若是 subcase 1a，记录 triggerBiIdx。下一段的 CS-A 主扫描
+//	从 max(segStart+1, prevTriggerBiIdx-1) 起；其他终止方式默认 segStart+1。
 func buildSegments(bis []Bi) []Segment {
 	if len(bis) < 3 {
 		return nil
@@ -687,10 +692,17 @@ func buildSegments(bis []Bi) []Segment {
 	biSeq := buildBiSeq(bis)
 	var segments []Segment
 	segStart := 0
+	prevTriggerBiIdx := 0 // 上一段触发笔下标；0 表示首段或上一段非 subcase 1a
 
 	for segStart < len(biSeq)-2 {
 		direction := biSeq[segStart].Direction
-		result := findSegmentEnd(biSeq, segStart, direction)
+
+		scanFromBi := segStart + 1
+		if prevTriggerBiIdx > 0 && prevTriggerBiIdx-1 > scanFromBi {
+			scanFromBi = prevTriggerBiIdx - 1
+		}
+
+		result := findSegmentEnd(biSeq, segStart, scanFromBi, direction)
 		if !result.confirmed {
 			break
 		}
@@ -708,9 +720,11 @@ func buildSegments(bis []Bi) []Segment {
 			AnotherTransition: result.anotherTransition,
 			TerminationCase:   result.termCase,
 			Subcase:           result.subcase,
+			TriggerBiIdx:      result.triggerBiIdx,
 		}
 		segments = append(segments, seg)
 		segStart = result.endBiIdx + 1
+		prevTriggerBiIdx = result.triggerBiIdx
 	}
 	return segments
 }
@@ -746,10 +760,13 @@ func directionFromType(direction string, isStart bool) string {
 //	若 handleCase1/2 返回 not confirmed，段未终止，主扫描继续，等下一根
 //	反向笔进入 csA 后再做识别（滑动窗口）。
 //	向下段对称（无缺口 = a.low <= b.high；b 结构上低于 a = b.low < a.low）。
-func findSegmentEnd(biSeq []SeqElem, segStart int, direction string) segmentEndResult {
+//
+//	scanFromBi: 主扫描起始的笔下标。一般 = segStart + 1，但若上一段是
+//	subcase 1a 终止，则下一段从 触发笔下标-1 开始（由 buildSegments 计算后传入）。
+func findSegmentEnd(biSeq []SeqElem, segStart int, scanFromBi int, direction string) segmentEndResult {
 	var csA []SeqElem // 第一CS，反向笔，前包后
 
-	for j := segStart + 1; j < len(biSeq); j++ {
+	for j := scanFromBi; j < len(biSeq); j++ {
 		elem := biSeq[j]
 
 		if elem.Direction == direction {
@@ -956,11 +973,12 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 				if (direction == "up" && seqIsTop(a, bm, c)) ||
 					(direction == "down" && seqIsBottom(a, bm, c)) {
 					return segmentEndResult{
-						confirmed:  true,
-						endBiIdx:   breakingIdx - 1,
-						transition: mainTransition,
-						termCase:   1,
-						subcase:    1,
+						confirmed:    true,
+						endBiIdx:     breakingIdx - 1,
+						transition:   mainTransition,
+						termCase:     1,
+						subcase:      1,
+						triggerBiIdx: j,
 					}
 				}
 			}
@@ -986,6 +1004,7 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 						anotherTransition: &anotherFx,
 						termCase:          1,
 						subcase:           1,
+						triggerBiIdx:      j,
 					}
 				}
 			}
@@ -999,11 +1018,12 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 			if elem.Low < breakingLow {
 				// 破结束点 → 终止
 				return segmentEndResult{
-					confirmed:  true,
-					endBiIdx:   breakingIdx - 1,
-					transition: mainTransition,
-					termCase:   1,
-					subcase:    1,
+					confirmed:    true,
+					endBiIdx:     breakingIdx - 1,
+					transition:   mainTransition,
+					termCase:     1,
+					subcase:      1,
+					triggerBiIdx: j,
 				}
 			}
 		} else {
@@ -1012,11 +1032,12 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 			}
 			if elem.High > breakingHigh {
 				return segmentEndResult{
-					confirmed:  true,
-					endBiIdx:   breakingIdx - 1,
-					transition: mainTransition,
-					termCase:   1,
-					subcase:    1,
+					confirmed:    true,
+					endBiIdx:     breakingIdx - 1,
+					transition:   mainTransition,
+					termCase:     1,
+					subcase:      1,
+					triggerBiIdx: j,
 				}
 			}
 		}
@@ -1282,11 +1303,13 @@ func traceSubcase1aDualCS(biSeq []SeqElem, b SeqElem, direction string) *DualCSD
 //	对应原 bis 中的"破坏笔"索引（= endBiIdx + 1）。
 //	返回 (csA, [a, b, c=-1]在 csA 中的下标, found)
 //	c 在新算法主扫描中并不存在（没有 3 元素顶分型）；保留位置占位为 -1。
-func diagnoseSegmentTrace(biSeq []SeqElem, segStart, endBiIdx int, direction string) ([]SeqElem, [3]int, bool) {
+//
+//	scanFromBi: 与 findSegmentEnd 一致的主扫描起点。
+func diagnoseSegmentTrace(biSeq []SeqElem, scanFromBi, endBiIdx int, direction string) ([]SeqElem, [3]int, bool) {
 	var csA []SeqElem
 	targetBiIdx := endBiIdx + 1 // 破坏笔下标 = b.BiStartIdx
 
-	for j := segStart + 1; j < len(biSeq); j++ {
+	for j := scanFromBi; j < len(biSeq); j++ {
 		elem := biSeq[j]
 		if elem.Direction == direction {
 			continue
@@ -1373,7 +1396,16 @@ func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
 		return diag
 	}
 
-	csA, fxIdx, traced := diagnoseSegmentTrace(biSeq, segStart, endBiIdx, seg.Direction)
+	// 与 buildSegments 一致地计算本段扫描起点（依据上一段 TriggerBiIdx）
+	scanFromBi := segStart + 1
+	if idx > 0 {
+		prevTrigger := segments[idx-1].TriggerBiIdx
+		if prevTrigger > 0 && prevTrigger-1 > scanFromBi {
+			scanFromBi = prevTrigger - 1
+		}
+	}
+
+	csA, fxIdx, traced := diagnoseSegmentTrace(biSeq, scanFromBi, endBiIdx, seg.Direction)
 	diag.CSA = make([]CSAItem, len(csA))
 	for i, e := range csA {
 		diag.CSA[i] = CSAItem{
