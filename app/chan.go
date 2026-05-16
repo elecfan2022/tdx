@@ -882,13 +882,15 @@ func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string, 
 		fractalType = "bottom"
 	}
 
-	if breakingIdx+2 >= len(biSeq) {
+	// thirdBi 取 b 之后第一根反向笔（b.BiEndIdx+2，跳 1 根同向笔）。
+	// 当 b 是合并元素时，breakingIdx+2 仍落在 b 内部组成笔上，是错位。
+	if b.BiEndIdx+2 >= len(biSeq) {
 		// 数据不足，无法判定 subcase 也无法验证 顶分型 → not confirmed
 		return segmentEndResult{confirmed: false}
 	}
 
-	breakingBi := biSeq[breakingIdx]
-	thirdBi := biSeq[breakingIdx+2]
+	breakingBi := b // 用合并后的 b（不是 biSeq[breakingIdx] = b 的首根子笔）
+	thirdBi := biSeq[b.BiEndIdx+2]
 	// 3rd 笔 ⊂ breaking笔 ?
 	fcb, _ := seqContained(breakingBi, thirdBi)
 	if !fcb {
@@ -922,12 +924,15 @@ func handleCase1(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string, 
 
 // subcase1aDualCS Subcase 1a 双 CS 验证
 //
-//	CS-A 起点 = 3rd 笔（biSeq[breakingIdx+2]）, 前包后, 找段方向相反分型
+//	CS-A 起点 = 3rd 笔（biSeq[b.BiEndIdx+2]，= b 之后第一根反向笔）, 前包后, 找段方向相反分型
 //	CS-B 起点 = 3rd 笔之后的第一根同向笔, 不做包含, 找段方向相反对应分型
 //	破点：破 breaking.结束点（向上段：跌破 breaking.To.Price）→ 终止
 //	      破 breaking.开始点（向上段：突破 breaking.From.Price）→ 段延续
+//
+//	注意：用合并后的 originalB 作 breakingBi，并以 originalB.BiEndIdx+2 起 CS-A，
+//	防止 b 是合并元素时取到 b 内部子笔。
 func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direction string) segmentEndResult {
-	breakingBi := biSeq[breakingIdx]
+	breakingBi := originalB
 	breakingHigh := breakingBi.High
 	breakingLow := breakingBi.Low
 	breakingStart := breakingBi.FromPrice // 破坏笔起始点
@@ -936,10 +941,10 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 
 	mainTransition := makeFractalAt(originalB, ternaryString(direction == "up", "top", "bottom"))
 
-	csA := []SeqElem{biSeq[breakingIdx+2]}
+	csA := []SeqElem{biSeq[originalB.BiEndIdx+2]}
 	var csB []SeqElem
 
-	for j := breakingIdx + 3; j < len(biSeq); j++ {
+	for j := originalB.BiEndIdx + 3; j < len(biSeq); j++ {
 		elem := biSeq[j]
 
 		// 第一步：CS 更新 + 分型检查（分型优先于破点）
@@ -1022,7 +1027,7 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 
 // handleCase2 第二种情况处理（顶/底分型，有缺口）
 //
-//	入口验证：先验证 第一CS 三元素 [a, b, c=biSeq[breakingIdx+2]] 是否构成
+//	入口验证：先验证 第一CS 三元素 [a, b, c=biSeq[b.BiEndIdx+2]] 是否构成
 //	顶分型/底分型（与 subcase 1b 同款验证）。未构成 → not confirmed，主扫描继续。
 //	构成后才启动 第二CS。
 //
@@ -1173,23 +1178,24 @@ func csAToItems(cs []SeqElem) []CSAItem {
 //
 //	镜像生产代码的判定顺序（CS 更新+分型检查 在前，破点检查 在后）。
 //	无论哪种 Trigger 都会填充 CSA / CSB 的最终状态。
-func traceSubcase1aDualCS(biSeq []SeqElem, breakingIdx int, direction string) *DualCSDiag {
-	if breakingIdx+2 >= len(biSeq) {
+//	b 是合并后的破坏笔（与 subcase1aDualCS 的 originalB 一致），CS-A 起点
+//	和循环起点都用 b.BiEndIdx，避免 b 是合并元素时取到 b 内部子笔。
+func traceSubcase1aDualCS(biSeq []SeqElem, b SeqElem, direction string) *DualCSDiag {
+	if b.BiEndIdx+2 >= len(biSeq) {
 		return nil
 	}
-	breakingBi := biSeq[breakingIdx]
 	diag := &DualCSDiag{
 		Trigger:           "exhausted",
 		TriggerBiIdx:      -1,
 		TriggerFractalIdx: [3]int{-1, -1, -1},
-		BreakingHigh:      breakingBi.High,
-		BreakingLow:       breakingBi.Low,
+		BreakingHigh:      b.High,
+		BreakingLow:       b.Low,
 	}
 
-	csA := []SeqElem{biSeq[breakingIdx+2]}
+	csA := []SeqElem{biSeq[b.BiEndIdx+2]}
 	var csB []SeqElem
 
-	for j := breakingIdx + 3; j < len(biSeq); j++ {
+	for j := b.BiEndIdx + 3; j < len(biSeq); j++ {
 		elem := biSeq[j]
 
 		// 第一步：CS 更新 + 分型检查
@@ -1406,9 +1412,13 @@ func DiagnoseSegmentFromBis(bis []Bi, startDatePrefix string) SegmentDiag {
 	}
 
 	// 若为 subcase 1a，补充双 CS 内部 trace
-	if seg.TerminationCase == 1 && seg.Subcase == 1 {
-		breakingIdx := endBiIdx + 1 // 破坏笔下标
-		diag.DualCS = traceSubcase1aDualCS(biSeq, breakingIdx, seg.Direction)
+	//
+	// b 取 trace 出的 csA[fxIdx[1]]（合并后的破坏笔元素），与生产代码
+	// subcase1aDualCS 拿到的 originalB 一致；不能用 biSeq[breakingIdx]
+	// 那是 b 的首根子笔。
+	if seg.TerminationCase == 1 && seg.Subcase == 1 && traced && fxIdx[1] >= 0 && fxIdx[1] < len(csA) {
+		b := csA[fxIdx[1]]
+		diag.DualCS = traceSubcase1aDualCS(biSeq, b, seg.Direction)
 	}
 
 	return diag
