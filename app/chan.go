@@ -788,7 +788,7 @@ func findSegmentEnd(biSeq []SeqElem, segStart int, direction string) segmentEndR
 			}
 		} else {
 			// 潜在 第二种情况
-			result := handleCase2(biSeq, b, direction)
+			result := handleCase2(biSeq, b.BiStartIdx, b, direction, a)
 			if result.confirmed {
 				return result
 			}
@@ -1022,52 +1022,73 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 
 // handleCase2 第二种情况处理（顶/底分型，有缺口）
 //
+//	入口验证：先验证 第一CS 三元素 [a, b, c=biSeq[breakingIdx+2]] 是否构成
+//	顶分型/底分型（与 subcase 1b 同款验证）。未构成 → not confirmed，主扫描继续。
+//	构成后才启动 第二CS。
+//
 //	第二CS 起点 = b 之后第一根同向笔，前后都可以包含，找段方向相反分型
 //	（不区分该分型的 第一/第二种情况，出现即终止）
-//	单根笔 high 超过 b.high（向上段）/ low 跌破 b.low（向下段）→ 段延续
-func handleCase2(biSeq []SeqElem, b SeqElem, direction string) segmentEndResult {
+//	循环顺序：cs2 更新 + 分型检查 在前；破点检查 在后（分型优先于破点）。
+//	单根笔 high 超过 b.high（向上段）/ low 跌破 b.low（向下段）→ 段延续。
+func handleCase2(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string, a SeqElem) segmentEndResult {
 	fractalType := ternaryString(direction == "up", "top", "bottom")
 	mainTransition := makeFractalAt(b, fractalType)
 	opposite := ternaryString(direction == "up", "bottom", "top")
+
+	// 入口验证：第一CS 三元素 顶/底分型
+	//
+	// 注意：c 必须取 b 之后的下一根反向笔（= b.BiEndIdx+2，跳过 1 根同向笔），
+	// 而不是 biSeq[breakingIdx+2]。当 b 是合并元素时 breakingIdx+2 仍落在 b 内
+	// 部，会把 b 的组成笔当成 c。
+	_ = breakingIdx
+	if b.BiEndIdx+2 >= len(biSeq) {
+		return segmentEndResult{confirmed: false}
+	}
+	c1 := biSeq[b.BiEndIdx+2]
+	var firstCSFractalOK bool
+	if direction == "up" {
+		firstCSFractalOK = seqIsTop(a, b, c1)
+	} else {
+		firstCSFractalOK = seqIsBottom(a, b, c1)
+	}
+	if !firstCSFractalOK {
+		return segmentEndResult{confirmed: false}
+	}
 
 	var cs2 []SeqElem
 
 	for j := b.BiEndIdx + 1; j < len(biSeq); j++ {
 		elem := biSeq[j]
 
-		// 段延续检查（单根笔破 b 的开始点）
+		// 第一步：cs2 更新 + 分型检查（分型优先于破点）
+		if elem.Direction == direction {
+			cs2 = addToCSBoth(cs2, elem, direction, false)
+			if len(cs2) >= 3 {
+				a2, bm, c2 := cs2[len(cs2)-3], cs2[len(cs2)-2], cs2[len(cs2)-1]
+				ok := false
+				if opposite == "bottom" {
+					ok = seqIsBottom(a2, bm, c2)
+				} else {
+					ok = seqIsTop(a2, bm, c2)
+				}
+				if ok {
+					return segmentEndResult{
+						confirmed:  true,
+						endBiIdx:   b.BiStartIdx - 1,
+						transition: mainTransition,
+						termCase:   2,
+						subcase:    0,
+					}
+				}
+			}
+		}
+
+		// 第二步：破点检查（仅在没出现分型时作为兜底）
 		if direction == "up" && elem.High > b.High {
 			return segmentEndResult{confirmed: false}
 		}
 		if direction == "down" && elem.Low < b.Low {
 			return segmentEndResult{confirmed: false}
-		}
-
-		// 仅同向笔进 第二CS
-		if elem.Direction != direction {
-			continue
-		}
-		cs2 = addToCSBoth(cs2, elem, direction, false)
-
-		if len(cs2) >= 3 {
-			a, bm, c := cs2[len(cs2)-3], cs2[len(cs2)-2], cs2[len(cs2)-1]
-			ok := false
-			if opposite == "bottom" {
-				ok = seqIsBottom(a, bm, c)
-			} else {
-				ok = seqIsTop(a, bm, c)
-			}
-			if ok {
-				// b 那一笔需要从原 bis 切片重建以拿到正确的 Fractal 时间
-				// 这里直接用 b 的 From/To 字段
-				return segmentEndResult{
-					confirmed:  true,
-					endBiIdx:   b.BiStartIdx - 1,
-					transition: mainTransition,
-					termCase:   2,
-					subcase:    0,
-				}
-			}
 		}
 	}
 
