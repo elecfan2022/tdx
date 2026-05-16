@@ -680,6 +680,7 @@ type segmentEndResult struct {
 	subcase                int
 	triggerBiIdx           int // 仅 subcase 1a CS-A fractal 触发时设置（>0）；下一段 CS 扫描从此 -1 起
 	anotherTransitionBiIdx int // 仅 subcase 1a CS-B fractal 触发时设置（>0）；派生中间段后下一段 segStart 用此值
+	continueFromBi         int // 仅段延续（破开始点）时设置（>0）；主扫描跳到此 j，跳过中间笔，保持老 b 为 csA[-1]
 }
 
 // buildSegments 从笔列表构建线段列表
@@ -828,11 +829,19 @@ func findSegmentEnd(biSeq []SeqElem, segStart int, scanFromBi int, direction str
 			if result.confirmed {
 				return result
 			}
+			if result.continueFromBi > j {
+				// 破开始点段延续：j 跳到 trigger_bi，跳过中间笔，
+				// 保持老 b 为 csA[-1]，新识别用 (老 b, trigger_bi)
+				j = result.continueFromBi - 1 // 下一轮 j++ 后落在 continueFromBi
+			}
 		} else {
 			// 潜在 第二种情况
 			result := handleCase2(biSeq, b.BiStartIdx, b, direction, a)
 			if result.confirmed {
 				return result
+			}
+			if result.continueFromBi > j {
+				j = result.continueFromBi - 1
 			}
 		}
 		// 不 confirmed → 段延续，继续主扫描
@@ -1062,7 +1071,9 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 		// 第二步：破点检查（仅在没出现分型时作为兜底）
 		if direction == "up" {
 			if elem.High > breakingHigh {
-				return segmentEndResult{confirmed: false} // 破开始点 → 段延续
+				// 破开始点 → 段延续。返回 continueFromBi 让主扫描跳到 trigger_bi，
+				// 保持老 b 留在 csA[-1] 不被中间笔合并污染
+				return segmentEndResult{confirmed: false, continueFromBi: j}
 			}
 			if elem.Low < breakingLow {
 				// 破结束点 → 终止（不设 triggerBiIdx：break_end 无 trio 结构，下一段自然扫描）
@@ -1076,7 +1087,7 @@ func subcase1aDualCS(biSeq []SeqElem, breakingIdx int, originalB SeqElem, direct
 			}
 		} else {
 			if elem.Low < breakingLow {
-				return segmentEndResult{confirmed: false}
+				return segmentEndResult{confirmed: false, continueFromBi: j}
 			}
 			if elem.High > breakingHigh {
 				return segmentEndResult{
@@ -1157,11 +1168,12 @@ func handleCase2(biSeq []SeqElem, breakingIdx int, b SeqElem, direction string, 
 		}
 
 		// 第二步：破点检查（仅在没出现分型时作为兜底）
+		// 破开始点 → 段延续；continueFromBi 让主扫描跳到 trigger_bi，保持老 b 为 csA[-1]
 		if direction == "up" && elem.High > b.High {
-			return segmentEndResult{confirmed: false}
+			return segmentEndResult{confirmed: false, continueFromBi: j}
 		}
 		if direction == "down" && elem.Low < b.Low {
-			return segmentEndResult{confirmed: false}
+			return segmentEndResult{confirmed: false, continueFromBi: j}
 		}
 	}
 
